@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/supabase-community/realtime-go/tests"
+	"github.com/techloopdev/realtime-go/tests"
 )
 
 // testClient creates a RealtimeClient with a mock connection for testing
