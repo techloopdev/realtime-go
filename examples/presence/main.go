@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/supabase-community/realtime-go/realtime"
+	"github.com/techloopdev/realtime-go/realtime"
 )
 
 func main() {
