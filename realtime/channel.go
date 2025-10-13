@@ -128,6 +128,11 @@ func (ch *channel) Unsubscribe() error {
 	// Reset subscription state
 	ch.subscribed = false
 
+	// Clear all callbacks to prevent accumulation (CRIT-05)
+	ch.mu.Lock()
+	ch.callbacks = make(map[string][]interface{})
+	ch.mu.Unlock()
+
 	return nil
 }
 
@@ -146,7 +151,13 @@ func (ch *channel) OnPresence(callback func(PresenceEvent)) {
 func (ch *channel) OnBroadcast(event string, callback func(json.RawMessage)) error {
 	ch.mu.Lock()
 	defer ch.mu.Unlock()
-	ch.callbacks[fmt.Sprintf("broadcast:%s", event)] = append(ch.callbacks[fmt.Sprintf("broadcast:%s", event)], callback)
+
+	key := fmt.Sprintf("broadcast:%s", event)
+
+	// Single-handler semantics (last-wins)
+	// Replace existing handler instead of appending
+	ch.callbacks[key] = []interface{}{callback}
+
 	return nil
 }
 
