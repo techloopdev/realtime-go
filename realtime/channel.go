@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"nhooyr.io/websocket"
 )
@@ -53,6 +54,9 @@ func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, 
 	ch.mu.Unlock()
 
 	ref := ch.client.NextRef()
+	subscribeStart := time.Now()
+
+	ch.client.logger.Printf("[SUBSCRIBE_START] channel=%s ref=%d", ch.topic, ref)
 
 	// Create channel to wait for ACK
 	ackChan := make(chan error, 1)
@@ -60,8 +64,12 @@ func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, 
 	// Register ACK handler
 	ch.client.registerAckHandler(ref, func(status string, payload json.RawMessage) {
 		if status == "ok" {
+			ch.client.logger.Printf("[SUBSCRIBE_ACK_OK] channel=%s ref=%d latency=%dms",
+				ch.topic, ref, time.Since(subscribeStart).Milliseconds())
 			ackChan <- nil
 		} else {
+			ch.client.logger.Printf("[SUBSCRIBE_ACK_REJECT] channel=%s ref=%d status=%s latency=%dms",
+				ch.topic, ref, status, time.Since(subscribeStart).Milliseconds())
 			ackChan <- fmt.Errorf("join rejected: %s", status)
 		}
 	})
@@ -127,6 +135,8 @@ func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, 
 		ch.state = ChannelStateErrored
 		ch.mu.Unlock()
 		err := fmt.Errorf("join ACK timeout: %w", ctx.Err())
+		ch.client.logger.Printf("[SUBSCRIBE_TIMEOUT] channel=%s ref=%d waited=%dms",
+			ch.topic, ref, time.Since(subscribeStart).Milliseconds())
 		if callback != nil {
 			callback(SubscribeStateTimedOut, err)
 		}

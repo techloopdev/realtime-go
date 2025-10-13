@@ -312,26 +312,37 @@ func (c *RealtimeClient) reconnect() {
 
 			successCount := 0
 			failureCount := 0
+			startTime := time.Now()
+
+			c.logger.Printf("[RECONNECT] Starting rejoin for %d channels", len(channels))
 
 			for _, ch := range channels {
+				rejoinStart := time.Now()
 				if err := ch.rejoin(); err != nil {
-					c.logger.Printf("Failed to rejoin channel %s: %v", ch.topic, err)
+					c.logger.Printf("[REJOIN_FAIL] channel=%s error=%v latency=%dms",
+						ch.topic, err, time.Since(rejoinStart).Milliseconds())
 					failureCount++
 
 					// Retry once
 					time.Sleep(500 * time.Millisecond)
+					retryStart := time.Now()
 					if retryErr := ch.rejoin(); retryErr != nil {
-						c.logger.Printf("Retry failed for %s: %v", ch.topic, retryErr)
+						c.logger.Printf("[REJOIN_RETRY_FAIL] channel=%s error=%v latency=%dms",
+							ch.topic, retryErr, time.Since(retryStart).Milliseconds())
 					} else {
-						c.logger.Printf("Retry succeeded for %s", ch.topic)
+						c.logger.Printf("[REJOIN_RETRY_SUCCESS] channel=%s latency=%dms",
+							ch.topic, time.Since(retryStart).Milliseconds())
 						successCount++
 					}
 				} else {
+					c.logger.Printf("[REJOIN_SUCCESS] channel=%s latency=%dms",
+						ch.topic, time.Since(rejoinStart).Milliseconds())
 					successCount++
 				}
 			}
 
-			c.logger.Printf("Rejoin completed: %d success, %d failure", successCount, failureCount)
+			c.logger.Printf("[RECONNECT_COMPLETE] success=%d failure=%d total_latency=%dms",
+				successCount, failureCount, time.Since(startTime).Milliseconds())
 			return
 		}
 
