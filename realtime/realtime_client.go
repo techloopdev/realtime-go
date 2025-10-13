@@ -302,12 +302,36 @@ func (c *RealtimeClient) reconnect() {
 		cancel()
 
 		if err == nil {
-			// Rejoin all channels
+			// Sequential rejoin with error handling
 			c.mu.RLock()
+			channels := make([]*channel, 0, len(c.channels))
 			for _, ch := range c.channels {
-				go ch.rejoin()
+				channels = append(channels, ch)
 			}
 			c.mu.RUnlock()
+
+			successCount := 0
+			failureCount := 0
+
+			for _, ch := range channels {
+				if err := ch.rejoin(); err != nil {
+					c.logger.Printf("Failed to rejoin channel %s: %v", ch.topic, err)
+					failureCount++
+
+					// Retry once
+					time.Sleep(500 * time.Millisecond)
+					if retryErr := ch.rejoin(); retryErr != nil {
+						c.logger.Printf("Retry failed for %s: %v", ch.topic, retryErr)
+					} else {
+						c.logger.Printf("Retry succeeded for %s", ch.topic)
+						successCount++
+					}
+				} else {
+					successCount++
+				}
+			}
+
+			c.logger.Printf("Rejoin completed: %d success, %d failure", successCount, failureCount)
 			return
 		}
 
