@@ -52,15 +52,32 @@ func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, 
 	ch.state = ChannelStateJoining
 	ch.mu.Unlock()
 
+	ref := ch.client.NextRef()
+
+	// Create channel to wait for ACK
+	ackChan := make(chan error, 1)
+
+	// Register ACK handler
+	ch.client.registerAckHandler(ref, func(status string, payload json.RawMessage) {
+		if status == "ok" {
+			ackChan <- nil
+		} else {
+			ackChan <- fmt.Errorf("join rejected: %s", status)
+		}
+	})
+	defer ch.client.unregisterAckHandler(ref)
+
 	subscribeMsg := struct {
 		Type    string      `json:"type"`
 		Topic   string      `json:"topic"`
 		Event   string      `json:"event"`
+		Ref     int         `json:"ref"`
 		Payload interface{} `json:"payload"`
 	}{
 		Type:    "subscribe",
 		Topic:   ch.topic,
 		Event:   "phx_join",
+		Ref:     ref,
 		Payload: ch.config,
 	}
 
@@ -79,18 +96,42 @@ func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, 
 		return err
 	}
 
-	ch.joinedOnce = true
-	ch.subscribed = true // Track current subscription state
+	// Wait for ACK with timeout
+	select {
+	case err := <-ackChan:
+		if err != nil {
+			ch.mu.Lock()
+			ch.state = ChannelStateErrored
+			ch.mu.Unlock()
+			if callback != nil {
+				callback(SubscribeStateChannelError, err)
+			}
+			return err
+		}
 
-	ch.mu.Lock()
-	ch.state = ChannelStateJoined
-	ch.mu.Unlock()
+		// Mark subscribed ONLY after ACK
+		ch.joinedOnce = true
+		ch.subscribed = true
 
-	if callback != nil {
-		callback(SubscribeStateSubscribed, nil)
+		ch.mu.Lock()
+		ch.state = ChannelStateJoined
+		ch.mu.Unlock()
+
+		if callback != nil {
+			callback(SubscribeStateSubscribed, nil)
+		}
+		return nil
+
+	case <-ctx.Done():
+		ch.mu.Lock()
+		ch.state = ChannelStateErrored
+		ch.mu.Unlock()
+		err := fmt.Errorf("join ACK timeout: %w", ctx.Err())
+		if callback != nil {
+			callback(SubscribeStateTimedOut, err)
+		}
+		return err
 	}
-
-	return nil
 }
 
 func (ch *channel) Unsubscribe() error {

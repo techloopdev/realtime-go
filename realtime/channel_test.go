@@ -10,20 +10,23 @@ import (
 )
 
 func TestChannelSubscribe(t *testing.T) {
-	client, mockConn := testClient()
+	realtimeClient, mockConn := testClient()
+	client := realtimeClient.(*RealtimeClient)
 	channel := client.Channel("test-channel", &ChannelConfig{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Add a mock response message
-	responseMsg, _ := json.Marshal(map[string]interface{}{
-		"type":    "phx_reply",
-		"topic":   "test-channel",
-		"event":   "phx_join",
-		"payload": map[string]interface{}{"status": "ok"},
-	})
-	mockConn.AddReadMessage(responseMsg)
+	// Simulate ACK response from server
+	go func() {
+		time.Sleep(10 * time.Millisecond) // Small delay to let Subscribe() register handler
+		client.ackHandlersMu.RLock()
+		handler, exists := client.ackHandlers[1] // ref=1 for first call
+		client.ackHandlersMu.RUnlock()
+		if exists {
+			handler("ok", json.RawMessage(`{}`))
+		}
+	}()
 
 	err := channel.Subscribe(ctx, func(state SubscribeState, err error) {
 		assert.NoError(t, err)
@@ -39,7 +42,8 @@ func TestChannelSubscribe(t *testing.T) {
 }
 
 func TestChannelUnsubscribe(t *testing.T) {
-	client, mockConn := testClient()
+	realtimeClient, mockConn := testClient()
+	client := realtimeClient.(*RealtimeClient)
 
 	// Print initial messages
 	initialMessages := mockConn.GetWriteMessages()
@@ -57,6 +61,18 @@ func TestChannelUnsubscribe(t *testing.T) {
 	// First subscribe to the channel
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	// Simulate ACK response
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		client.ackHandlersMu.RLock()
+		handler, exists := client.ackHandlers[1]
+		client.ackHandlersMu.RUnlock()
+		if exists {
+			handler("ok", json.RawMessage(`{}`))
+		}
+	}()
+
 	err := channel.Subscribe(ctx, nil)
 	assert.NoError(t, err)
 
@@ -248,7 +264,8 @@ func TestChannelGetTopic(t *testing.T) {
 }
 
 func TestChannelRejoin(t *testing.T) {
-	client, mockConn := testClient()
+	realtimeClient, mockConn := testClient()
+	client := realtimeClient.(*RealtimeClient)
 	ch := client.Channel("test-channel", &ChannelConfig{}).(*channel)
 
 	// Initially not subscribed and joinedOnce is false, so rejoin should do nothing
@@ -259,9 +276,32 @@ func TestChannelRejoin(t *testing.T) {
 	// Subscribe first
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	// Simulate ACK response for first subscription
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		client.ackHandlersMu.RLock()
+		handler, exists := client.ackHandlers[1]
+		client.ackHandlersMu.RUnlock()
+		if exists {
+			handler("ok", json.RawMessage(`{}`))
+		}
+	}()
+
 	err = ch.Subscribe(ctx, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(mockConn.GetWriteMessages())) // phx_join
+
+	// Simulate ACK response for rejoin
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		client.ackHandlersMu.RLock()
+		handler, exists := client.ackHandlers[2]
+		client.ackHandlersMu.RUnlock()
+		if exists {
+			handler("ok", json.RawMessage(`{}`))
+		}
+	}()
 
 	// Now rejoin should re-subscribe (simulates reconnection scenario)
 	// rejoin() resets subscribed flag and calls Subscribe() again
