@@ -30,8 +30,8 @@ type RealtimeClient struct {
 	authToken      string
 	ref            int
 	refMu          sync.Mutex
-	hbTimer        *time.Timer
-	hbStop         chan struct{}
+	connCtx        context.Context
+	connCancel     context.CancelFunc
 	reconnMu       sync.Mutex
 	isReconnecting bool
 	logger         *log.Logger
@@ -50,7 +50,6 @@ func NewRealtimeClient(projectRef string, apiKey string) IRealtimeClient {
 	return &RealtimeClient{
 		config:   config,
 		channels: make(map[string]*channel),
-		hbStop:   make(chan struct{}),
 		logger:   log.Default(),
 	}
 }
@@ -80,10 +79,13 @@ func (c *RealtimeClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
+	// Create connection-scoped context
+	c.connCtx, c.connCancel = context.WithCancel(context.Background())
+
 	// Wrap the websocket.Conn in our Conn interface
 	c.conn = &websocketConnWrapper{conn}
-	go c.handleMessages()
-	go c.startHeartbeat()
+	go c.handleMessages(c.connCtx)
+	go c.startHeartbeat(c.connCtx)
 
 	return nil
 }
@@ -99,11 +101,12 @@ func (w *websocketConnWrapper) SetWriteLimit(limit int64) {
 
 // Disconnect closes the connection to the Supabase Realtime server
 func (c *RealtimeClient) Disconnect() error {
+	// Cancel connection context to stop goroutines gracefully
+	if c.connCancel != nil {
+		c.connCancel()
+	}
+
 	if c.conn != nil {
-		close(c.hbStop)
-		if c.hbTimer != nil {
-			c.hbTimer.Stop()
-		}
 		return c.conn.Close(websocket.StatusNormalClosure, "Closing the connection")
 	}
 	return nil
@@ -168,51 +171,67 @@ func (c *RealtimeClient) RemoveAllChannels() error {
 	return nil
 }
 
-func (c *RealtimeClient) handleMessages() {
+func (c *RealtimeClient) handleMessages(ctx context.Context) {
+	defer func() {
+		c.logger.Printf("handleMessages goroutine terminated")
+	}()
+
 	for {
-		ctx := context.Background()
-		_, data, err := c.conn.Read(ctx)
-		if err != nil {
-			c.logger.Printf("WebSocket read error: %v", err)
-			if c.config.AutoReconnect {
-				go c.reconnect()
-			}
+		select {
+		case <-ctx.Done():
 			return
-		}
+		default:
+			_, data, err := c.conn.Read(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				c.logger.Printf("WebSocket read error: %v", err)
+				if c.config.AutoReconnect {
+					go c.reconnect()
+				}
+				return
+			}
 
-		var msg Message
-		if err := json.Unmarshal(data, &msg); err != nil {
-			c.logger.Printf("Error unmarshaling message: %v", err)
-			continue
-		}
+			var msg Message
+			if err := json.Unmarshal(data, &msg); err != nil {
+				c.logger.Printf("Error unmarshaling message: %v", err)
+				continue
+			}
 
-		// Handle different message types
-		switch msg.Type {
-		case "broadcast":
-			c.handleBroadcast(msg)
-		case "presence":
-			c.handlePresence(msg)
-		case "postgres_changes":
-			c.handlePostgresChanges(msg)
+			// Handle different message types
+			switch msg.Type {
+			case "broadcast":
+				c.handleBroadcast(msg)
+			case "presence":
+				c.handlePresence(msg)
+			case "postgres_changes":
+				c.handlePostgresChanges(msg)
+			}
 		}
 	}
 }
 
-func (c *RealtimeClient) startHeartbeat() {
-	c.hbTimer = time.NewTimer(c.config.HBInterval)
-	defer c.hbTimer.Stop()
+func (c *RealtimeClient) startHeartbeat(ctx context.Context) {
+	defer func() {
+		c.logger.Printf("Heartbeat goroutine terminated")
+	}()
+
+	ticker := time.NewTicker(c.config.HBInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case <-c.hbTimer.C:
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 			if err := c.SendHeartbeat(); err != nil {
 				c.logger.Printf("Error sending heartbeat: %v", err)
 				if c.config.AutoReconnect {
 					go c.reconnect()
 				}
+				return
 			}
-		case <-c.hbStop:
-			return
 		}
 	}
 }
