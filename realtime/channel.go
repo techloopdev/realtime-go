@@ -19,6 +19,8 @@ type channel struct {
 	callbacks         map[string][]interface{}
 	mu                sync.RWMutex
 	joinedOnce        bool
+	subscribed        bool
+	subscribeMu       sync.Mutex
 }
 
 func newChannel(topic string, config *ChannelConfig, client *RealtimeClient) *channel {
@@ -34,8 +36,16 @@ func newChannel(topic string, config *ChannelConfig, client *RealtimeClient) *ch
 }
 
 func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, error)) error {
-	if ch.joinedOnce {
-		return fmt.Errorf("channel already subscribed")
+	ch.subscribeMu.Lock()
+	defer ch.subscribeMu.Unlock()
+
+	// Idempotent: if already subscribed, succeed immediately
+	if ch.subscribed {
+		ch.client.logger.Printf("Channel %s already subscribed (idempotent)", ch.topic)
+		if callback != nil {
+			callback(SubscribeStateSubscribed, nil)
+		}
+		return nil
 	}
 
 	ch.mu.Lock()
@@ -70,6 +80,8 @@ func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, 
 	}
 
 	ch.joinedOnce = true
+	ch.subscribed = true // Track current subscription state
+
 	ch.mu.Lock()
 	ch.state = ChannelStateJoined
 	ch.mu.Unlock()
@@ -82,6 +94,14 @@ func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, 
 }
 
 func (ch *channel) Unsubscribe() error {
+	ch.subscribeMu.Lock()
+	defer ch.subscribeMu.Unlock()
+
+	// Idempotent: if not subscribed, succeed immediately
+	if !ch.subscribed {
+		return nil
+	}
+
 	ch.mu.Lock()
 	ch.state = ChannelStateLeaving
 	ch.mu.Unlock()
@@ -100,7 +120,15 @@ func (ch *channel) Unsubscribe() error {
 	if err != nil {
 		return err
 	}
-	return ch.client.conn.Write(context.Background(), websocket.MessageText, data)
+
+	if err := ch.client.conn.Write(context.Background(), websocket.MessageText, data); err != nil {
+		return err
+	}
+
+	// Reset subscription state
+	ch.subscribed = false
+
+	return nil
 }
 
 func (ch *channel) OnMessage(callback func(Message)) {
@@ -196,14 +224,24 @@ func (ch *channel) GetState() ChannelState {
 }
 
 func (ch *channel) rejoin() error {
-	if !ch.joinedOnce {
+	ch.subscribeMu.Lock()
+	wasSubscribed := ch.subscribed
+	ch.subscribed = false // Reset to allow re-subscription
+	ch.subscribeMu.Unlock()
+
+	// Only rejoin if was previously subscribed
+	if !wasSubscribed && !ch.joinedOnce {
 		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), ch.client.config.Timeout)
 	defer cancel()
 
-	return ch.Subscribe(ctx, nil)
+	return ch.Subscribe(ctx, func(state SubscribeState, err error) {
+		if err != nil {
+			ch.client.logger.Printf("Rejoin failed for %s: %v", ch.topic, err)
+		}
+	})
 }
 
 // GetTopic returns the channel's topic

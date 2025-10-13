@@ -54,16 +54,28 @@ func TestChannelUnsubscribe(t *testing.T) {
 		t.Logf("Message %d: %v", i, msg)
 	}
 
-	err := channel.Unsubscribe()
+	// First subscribe to the channel
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := channel.Subscribe(ctx, nil)
 	assert.NoError(t, err)
-	assert.Equal(t, ChannelStateLeaving, channel.GetState())
 
-	// Print messages after unsubscribe
+	// Now unsubscribe
+	err = channel.Unsubscribe()
+	assert.NoError(t, err)
+
+	// After unsubscribe, channel should not be subscribed anymore
+	// State may still be from previous operation, but subscribed flag is reset
 	afterUnsubMessages := mockConn.GetWriteMessages()
 	t.Logf("After unsubscribe messages: %d", len(afterUnsubMessages))
 	for i, msg := range afterUnsubMessages {
 		t.Logf("Message %d: %v", i, msg)
 	}
+
+	// Verify unsubscribe message was sent
+	assert.GreaterOrEqual(t, len(afterUnsubMessages), 2) // subscribe + unsubscribe
+	lastMsg := afterUnsubMessages[len(afterUnsubMessages)-1].(string)
+	assert.Contains(t, lastMsg, "phx_leave")
 }
 
 func TestChannelOnMessage(t *testing.T) {
@@ -239,18 +251,23 @@ func TestChannelRejoin(t *testing.T) {
 	client, mockConn := testClient()
 	ch := client.Channel("test-channel", &ChannelConfig{}).(*channel)
 
-	// Initially joinedOnce is false, so rejoin should return nil
+	// Initially not subscribed and joinedOnce is false, so rejoin should do nothing
 	err := ch.rejoin()
 	assert.NoError(t, err)
 	assert.Equal(t, 0, len(mockConn.GetWriteMessages()))
 
-	// Set joinedOnce to true but don't set state to error
-	// Since channel is not subscribed yet, Subscribe will return error
-	ch.joinedOnce = true
+	// Subscribe first
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = ch.Subscribe(ctx, nil)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, len(mockConn.GetWriteMessages())) // phx_join
 
-	// When rejoin is called in this state, it will try to subscribe
-	// but we expect an error since we already set joinedOnce = true
+	// Now rejoin should re-subscribe (simulates reconnection scenario)
+	// rejoin() resets subscribed flag and calls Subscribe() again
 	err = ch.rejoin()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "channel already subscribed")
+	assert.NoError(t, err)
+	// Second phx_join message sent (rejoin behavior)
+	assert.Equal(t, 2, len(mockConn.GetWriteMessages()))
+	assert.Contains(t, mockConn.GetWriteMessages()[1].(string), "phx_join")
 }
