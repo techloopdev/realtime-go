@@ -102,17 +102,54 @@ func (w *websocketConnWrapper) SetWriteLimit(limit int64) {
 	// No-op as websocket.Conn doesn't have this method
 }
 
-// Disconnect closes the connection to the Supabase Realtime server
+// Disconnect closes the connection to the Supabase Realtime server gracefully
 func (c *RealtimeClient) Disconnect() error {
-	// Cancel connection context to stop goroutines gracefully
+	c.logger.Printf("[DISCONNECT] Starting graceful shutdown")
+	startTime := time.Now()
+
+	// Step 1: Unsubscribe from all channels (send phx_leave)
+	c.mu.RLock()
+	channels := make([]*channel, 0, len(c.channels))
+	for _, ch := range c.channels {
+		channels = append(channels, ch)
+	}
+	c.mu.RUnlock()
+
+	unsubscribeCount := 0
+	for _, ch := range channels {
+		if err := ch.Unsubscribe(); err != nil {
+			c.logger.Printf("[DISCONNECT_UNSUBSCRIBE_FAIL] channel=%s error=%v", ch.topic, err)
+		} else {
+			c.logger.Printf("[DISCONNECT_UNSUBSCRIBE_OK] channel=%s", ch.topic)
+			unsubscribeCount++
+		}
+	}
+
+	// Step 2: Grace period for phx_leave delivery (100ms per channel, max 500ms)
+	gracePeriod := time.Duration(len(channels)*100) * time.Millisecond
+	if gracePeriod > 500*time.Millisecond {
+		gracePeriod = 500 * time.Millisecond
+	}
+	if gracePeriod > 0 {
+		c.logger.Printf("[DISCONNECT] Waiting %dms for phx_leave delivery", gracePeriod.Milliseconds())
+		time.Sleep(gracePeriod)
+	}
+
+	// Step 3: Cancel connection context to stop goroutines
 	if c.connCancel != nil {
 		c.connCancel()
 	}
 
+	// Step 4: Close WebSocket connection
+	var closeErr error
 	if c.conn != nil {
-		return c.conn.Close(websocket.StatusNormalClosure, "Closing the connection")
+		closeErr = c.conn.Close(websocket.StatusNormalClosure, "Closing the connection")
 	}
-	return nil
+
+	c.logger.Printf("[DISCONNECT_COMPLETE] channels_unsubscribed=%d total_latency=%dms",
+		unsubscribeCount, time.Since(startTime).Milliseconds())
+
+	return closeErr
 }
 
 // Channel creates a new channel for realtime subscriptions
@@ -277,7 +314,14 @@ func (c *RealtimeClient) SendHeartbeat() error {
 	if err != nil {
 		return err
 	}
-	return c.conn.Write(context.Background(), websocket.MessageText, data)
+
+	// Use connCtx if available for graceful shutdown awareness
+	writeCtx := context.Background()
+	if c.connCtx != nil {
+		writeCtx = c.connCtx
+	}
+
+	return c.conn.Write(writeCtx, websocket.MessageText, data)
 }
 
 func (c *RealtimeClient) reconnect() {

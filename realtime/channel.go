@@ -36,6 +36,15 @@ func newChannel(topic string, config *ChannelConfig, client *RealtimeClient) *ch
 	}
 }
 
+// getWriteContext returns connCtx if available, fallback to Background
+// Respects connection lifecycle for graceful shutdown
+func (ch *channel) getWriteContext() context.Context {
+	if ch.client.connCtx != nil {
+		return ch.client.connCtx
+	}
+	return context.Background()
+}
+
 func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, error)) error {
 	ch.subscribeMu.Lock()
 	defer ch.subscribeMu.Unlock()
@@ -172,7 +181,7 @@ func (ch *channel) Unsubscribe() error {
 		return err
 	}
 
-	if err := ch.client.conn.Write(context.Background(), websocket.MessageText, data); err != nil {
+	if err := ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data); err != nil {
 		return err
 	}
 
@@ -231,7 +240,7 @@ func (ch *channel) SendBroadcast(event string, payload interface{}) error {
 	if err != nil {
 		return err
 	}
-	return ch.client.conn.Write(context.Background(), websocket.MessageText, data)
+	return ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data)
 }
 
 func (ch *channel) OnPostgresChange(event string, callback func(PostgresChangeEvent)) error {
@@ -258,7 +267,7 @@ func (ch *channel) Track(payload interface{}) error {
 	if err != nil {
 		return err
 	}
-	return ch.client.conn.Write(context.Background(), websocket.MessageText, data)
+	return ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data)
 }
 
 func (ch *channel) Untrack() error {
@@ -276,7 +285,7 @@ func (ch *channel) Untrack() error {
 	if err != nil {
 		return err
 	}
-	return ch.client.conn.Write(context.Background(), websocket.MessageText, data)
+	return ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data)
 }
 
 func (ch *channel) GetState() ChannelState {
