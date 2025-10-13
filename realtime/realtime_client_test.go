@@ -1,6 +1,7 @@
 package realtime
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -333,14 +334,18 @@ func TestStartHeartbeat(t *testing.T) {
 	// Set very short heartbeat interval for testing
 	realtimeClient.config.HBInterval = 10 * time.Millisecond
 
+	// Create context for heartbeat
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Start goroutine for heartbeat
-	go realtimeClient.startHeartbeat()
+	go realtimeClient.startHeartbeat(ctx)
 
 	// Wait for at least one heartbeat to be sent
 	time.Sleep(15 * time.Millisecond)
 
 	// Stop the heartbeat
-	close(realtimeClient.hbStop)
+	cancel()
 
 	// Allow for final cleanup
 	time.Sleep(5 * time.Millisecond)

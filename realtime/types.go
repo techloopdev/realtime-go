@@ -107,6 +107,7 @@ type Message struct {
 	Type    string          `json:"type"`
 	Topic   string          `json:"topic"`
 	Event   string          `json:"event"`
+	Ref     int             `json:"ref,omitempty"`
 	Payload json.RawMessage `json:"payload"`
 }
 

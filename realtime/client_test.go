@@ -14,6 +14,7 @@ func testClient() (IRealtimeClient, *tests.MockConn) {
 	client := NewRealtimeClient("test-project", "test-key").(*RealtimeClient)
 	mockConn := &tests.MockConn{}
 	client.SetConn(mockConn)
+
 	return client, mockConn
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"nhooyr.io/websocket"
 )
@@ -19,6 +20,8 @@ type channel struct {
 	callbacks         map[string][]interface{}
 	mu                sync.RWMutex
 	joinedOnce        bool
+	subscribed        bool
+	subscribeMu       sync.Mutex
 }
 
 func newChannel(topic string, config *ChannelConfig, client *RealtimeClient) *channel {
@@ -33,24 +36,65 @@ func newChannel(topic string, config *ChannelConfig, client *RealtimeClient) *ch
 	}
 }
 
+// getWriteContext returns connCtx if available, fallback to Background
+// Respects connection lifecycle for graceful shutdown
+func (ch *channel) getWriteContext() context.Context {
+	if ch.client.connCtx != nil {
+		return ch.client.connCtx
+	}
+	return context.Background()
+}
+
 func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, error)) error {
-	if ch.joinedOnce {
-		return fmt.Errorf("channel already subscribed")
+	ch.subscribeMu.Lock()
+	defer ch.subscribeMu.Unlock()
+
+	// Idempotent: if already subscribed, succeed immediately
+	if ch.subscribed {
+		ch.client.logger.Printf("Channel %s already subscribed (idempotent)", ch.topic)
+		if callback != nil {
+			callback(SubscribeStateSubscribed, nil)
+		}
+		return nil
 	}
 
 	ch.mu.Lock()
 	ch.state = ChannelStateJoining
 	ch.mu.Unlock()
 
+	ref := ch.client.NextRef()
+	subscribeStart := time.Now()
+
+	ch.client.logger.Printf("[SUBSCRIBE_START] channel=%s ref=%d", ch.topic, ref)
+
+	// Create channel to wait for ACK
+	ackChan := make(chan error, 1)
+
+	// Register ACK handler
+	ch.client.registerAckHandler(ref, func(status string, payload json.RawMessage) {
+		if status == "ok" {
+			ch.client.logger.Printf("[SUBSCRIBE_ACK_OK] channel=%s ref=%d latency=%dms",
+				ch.topic, ref, time.Since(subscribeStart).Milliseconds())
+			ackChan <- nil
+		} else {
+			ch.client.logger.Printf("[SUBSCRIBE_ACK_REJECT] channel=%s ref=%d status=%s latency=%dms",
+				ch.topic, ref, status, time.Since(subscribeStart).Milliseconds())
+			ackChan <- fmt.Errorf("join rejected: %s", status)
+		}
+	})
+	defer ch.client.unregisterAckHandler(ref)
+
 	subscribeMsg := struct {
 		Type    string      `json:"type"`
 		Topic   string      `json:"topic"`
 		Event   string      `json:"event"`
+		Ref     int         `json:"ref"`
 		Payload interface{} `json:"payload"`
 	}{
 		Type:    "subscribe",
 		Topic:   ch.topic,
 		Event:   "phx_join",
+		Ref:     ref,
 		Payload: ch.config,
 	}
 
@@ -69,19 +113,55 @@ func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, 
 		return err
 	}
 
-	ch.joinedOnce = true
-	ch.mu.Lock()
-	ch.state = ChannelStateJoined
-	ch.mu.Unlock()
+	// Wait for ACK with timeout
+	select {
+	case err := <-ackChan:
+		if err != nil {
+			ch.mu.Lock()
+			ch.state = ChannelStateErrored
+			ch.mu.Unlock()
+			if callback != nil {
+				callback(SubscribeStateChannelError, err)
+			}
+			return err
+		}
 
-	if callback != nil {
-		callback(SubscribeStateSubscribed, nil)
+		// Mark subscribed ONLY after ACK
+		ch.joinedOnce = true
+		ch.subscribed = true
+
+		ch.mu.Lock()
+		ch.state = ChannelStateJoined
+		ch.mu.Unlock()
+
+		if callback != nil {
+			callback(SubscribeStateSubscribed, nil)
+		}
+		return nil
+
+	case <-ctx.Done():
+		ch.mu.Lock()
+		ch.state = ChannelStateErrored
+		ch.mu.Unlock()
+		err := fmt.Errorf("join ACK timeout: %w", ctx.Err())
+		ch.client.logger.Printf("[SUBSCRIBE_TIMEOUT] channel=%s ref=%d waited=%dms",
+			ch.topic, ref, time.Since(subscribeStart).Milliseconds())
+		if callback != nil {
+			callback(SubscribeStateTimedOut, err)
+		}
+		return err
 	}
-
-	return nil
 }
 
 func (ch *channel) Unsubscribe() error {
+	ch.subscribeMu.Lock()
+	defer ch.subscribeMu.Unlock()
+
+	// Idempotent: if not subscribed, succeed immediately
+	if !ch.subscribed {
+		return nil
+	}
+
 	ch.mu.Lock()
 	ch.state = ChannelStateLeaving
 	ch.mu.Unlock()
@@ -100,7 +180,20 @@ func (ch *channel) Unsubscribe() error {
 	if err != nil {
 		return err
 	}
-	return ch.client.conn.Write(context.Background(), websocket.MessageText, data)
+
+	if err := ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data); err != nil {
+		return err
+	}
+
+	// Reset subscription state
+	ch.subscribed = false
+
+	// Clear all callbacks to prevent accumulation (CRIT-05)
+	ch.mu.Lock()
+	ch.callbacks = make(map[string][]interface{})
+	ch.mu.Unlock()
+
+	return nil
 }
 
 func (ch *channel) OnMessage(callback func(Message)) {
@@ -118,7 +211,13 @@ func (ch *channel) OnPresence(callback func(PresenceEvent)) {
 func (ch *channel) OnBroadcast(event string, callback func(json.RawMessage)) error {
 	ch.mu.Lock()
 	defer ch.mu.Unlock()
-	ch.callbacks[fmt.Sprintf("broadcast:%s", event)] = append(ch.callbacks[fmt.Sprintf("broadcast:%s", event)], callback)
+
+	key := fmt.Sprintf("broadcast:%s", event)
+
+	// Single-handler semantics (last-wins)
+	// Replace existing handler instead of appending
+	ch.callbacks[key] = []interface{}{callback}
+
 	return nil
 }
 
@@ -141,7 +240,7 @@ func (ch *channel) SendBroadcast(event string, payload interface{}) error {
 	if err != nil {
 		return err
 	}
-	return ch.client.conn.Write(context.Background(), websocket.MessageText, data)
+	return ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data)
 }
 
 func (ch *channel) OnPostgresChange(event string, callback func(PostgresChangeEvent)) error {
@@ -168,7 +267,7 @@ func (ch *channel) Track(payload interface{}) error {
 	if err != nil {
 		return err
 	}
-	return ch.client.conn.Write(context.Background(), websocket.MessageText, data)
+	return ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data)
 }
 
 func (ch *channel) Untrack() error {
@@ -186,7 +285,7 @@ func (ch *channel) Untrack() error {
 	if err != nil {
 		return err
 	}
-	return ch.client.conn.Write(context.Background(), websocket.MessageText, data)
+	return ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data)
 }
 
 func (ch *channel) GetState() ChannelState {
@@ -196,14 +295,24 @@ func (ch *channel) GetState() ChannelState {
 }
 
 func (ch *channel) rejoin() error {
-	if !ch.joinedOnce {
+	ch.subscribeMu.Lock()
+	wasSubscribed := ch.subscribed
+	ch.subscribed = false // Reset to allow re-subscription
+	ch.subscribeMu.Unlock()
+
+	// Only rejoin if was previously subscribed
+	if !wasSubscribed && !ch.joinedOnce {
 		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), ch.client.config.Timeout)
 	defer cancel()
 
-	return ch.Subscribe(ctx, nil)
+	return ch.Subscribe(ctx, func(state SubscribeState, err error) {
+		if err != nil {
+			ch.client.logger.Printf("Rejoin failed for %s: %v", ch.topic, err)
+		}
+	})
 }
 
 // GetTopic returns the channel's topic

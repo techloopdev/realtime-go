@@ -30,11 +30,13 @@ type RealtimeClient struct {
 	authToken      string
 	ref            int
 	refMu          sync.Mutex
-	hbTimer        *time.Timer
-	hbStop         chan struct{}
+	connCtx        context.Context
+	connCancel     context.CancelFunc
 	reconnMu       sync.Mutex
 	isReconnecting bool
 	logger         *log.Logger
+	ackHandlers    map[int]func(string, json.RawMessage)
+	ackHandlersMu  sync.RWMutex
 }
 
 // NewRealtimeClient creates a new RealtimeClient instance
@@ -48,10 +50,10 @@ func NewRealtimeClient(projectRef string, apiKey string) IRealtimeClient {
 	config.APIKey = apiKey
 
 	return &RealtimeClient{
-		config:   config,
-		channels: make(map[string]*channel),
-		hbStop:   make(chan struct{}),
-		logger:   log.Default(),
+		config:      config,
+		channels:    make(map[string]*channel),
+		logger:      log.Default(),
+		ackHandlers: make(map[int]func(string, json.RawMessage)),
 	}
 }
 
@@ -80,10 +82,13 @@ func (c *RealtimeClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
+	// Create connection-scoped context
+	c.connCtx, c.connCancel = context.WithCancel(context.Background())
+
 	// Wrap the websocket.Conn in our Conn interface
 	c.conn = &websocketConnWrapper{conn}
-	go c.handleMessages()
-	go c.startHeartbeat()
+	go c.handleMessages(c.connCtx)
+	go c.startHeartbeat(c.connCtx)
 
 	return nil
 }
@@ -97,16 +102,54 @@ func (w *websocketConnWrapper) SetWriteLimit(limit int64) {
 	// No-op as websocket.Conn doesn't have this method
 }
 
-// Disconnect closes the connection to the Supabase Realtime server
+// Disconnect closes the connection to the Supabase Realtime server gracefully
 func (c *RealtimeClient) Disconnect() error {
-	if c.conn != nil {
-		close(c.hbStop)
-		if c.hbTimer != nil {
-			c.hbTimer.Stop()
-		}
-		return c.conn.Close(websocket.StatusNormalClosure, "Closing the connection")
+	c.logger.Printf("[DISCONNECT] Starting graceful shutdown")
+	startTime := time.Now()
+
+	// Step 1: Unsubscribe from all channels (send phx_leave)
+	c.mu.RLock()
+	channels := make([]*channel, 0, len(c.channels))
+	for _, ch := range c.channels {
+		channels = append(channels, ch)
 	}
-	return nil
+	c.mu.RUnlock()
+
+	unsubscribeCount := 0
+	for _, ch := range channels {
+		if err := ch.Unsubscribe(); err != nil {
+			c.logger.Printf("[DISCONNECT_UNSUBSCRIBE_FAIL] channel=%s error=%v", ch.topic, err)
+		} else {
+			c.logger.Printf("[DISCONNECT_UNSUBSCRIBE_OK] channel=%s", ch.topic)
+			unsubscribeCount++
+		}
+	}
+
+	// Step 2: Grace period for phx_leave delivery (100ms per channel, max 500ms)
+	gracePeriod := time.Duration(len(channels)*100) * time.Millisecond
+	if gracePeriod > 500*time.Millisecond {
+		gracePeriod = 500 * time.Millisecond
+	}
+	if gracePeriod > 0 {
+		c.logger.Printf("[DISCONNECT] Waiting %dms for phx_leave delivery", gracePeriod.Milliseconds())
+		time.Sleep(gracePeriod)
+	}
+
+	// Step 3: Cancel connection context to stop goroutines
+	if c.connCancel != nil {
+		c.connCancel()
+	}
+
+	// Step 4: Close WebSocket connection
+	var closeErr error
+	if c.conn != nil {
+		closeErr = c.conn.Close(websocket.StatusNormalClosure, "Closing the connection")
+	}
+
+	c.logger.Printf("[DISCONNECT_COMPLETE] channels_unsubscribed=%d total_latency=%dms",
+		unsubscribeCount, time.Since(startTime).Milliseconds())
+
+	return closeErr
 }
 
 // Channel creates a new channel for realtime subscriptions
@@ -168,51 +211,87 @@ func (c *RealtimeClient) RemoveAllChannels() error {
 	return nil
 }
 
-func (c *RealtimeClient) handleMessages() {
+func (c *RealtimeClient) handleMessages(ctx context.Context) {
+	defer func() {
+		c.logger.Printf("handleMessages goroutine terminated")
+	}()
+
 	for {
-		ctx := context.Background()
-		_, data, err := c.conn.Read(ctx)
-		if err != nil {
-			c.logger.Printf("WebSocket read error: %v", err)
-			if c.config.AutoReconnect {
-				go c.reconnect()
-			}
+		select {
+		case <-ctx.Done():
 			return
-		}
+		default:
+			_, data, err := c.conn.Read(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				c.logger.Printf("WebSocket read error: %v", err)
+				if c.config.AutoReconnect {
+					go c.reconnect()
+				}
+				return
+			}
 
-		var msg Message
-		if err := json.Unmarshal(data, &msg); err != nil {
-			c.logger.Printf("Error unmarshaling message: %v", err)
-			continue
-		}
+			var msg Message
+			if err := json.Unmarshal(data, &msg); err != nil {
+				c.logger.Printf("Error unmarshaling message: %v", err)
+				continue
+			}
 
-		// Handle different message types
-		switch msg.Type {
-		case "broadcast":
-			c.handleBroadcast(msg)
-		case "presence":
-			c.handlePresence(msg)
-		case "postgres_changes":
-			c.handlePostgresChanges(msg)
+			// Handle phx_reply events (ACK responses)
+			if msg.Event == "phx_reply" {
+				c.ackHandlersMu.RLock()
+				handler, exists := c.ackHandlers[msg.Ref]
+				c.ackHandlersMu.RUnlock()
+
+				if exists {
+					var replyPayload struct {
+						Status   string          `json:"status"`
+						Response json.RawMessage `json:"response"`
+					}
+					if err := json.Unmarshal(msg.Payload, &replyPayload); err != nil {
+						c.logger.Printf("Error unmarshaling phx_reply payload: %v", err)
+					} else {
+						handler(replyPayload.Status, replyPayload.Response)
+					}
+				}
+				continue
+			}
+
+			// Handle different message types
+			switch msg.Type {
+			case "broadcast":
+				c.handleBroadcast(msg)
+			case "presence":
+				c.handlePresence(msg)
+			case "postgres_changes":
+				c.handlePostgresChanges(msg)
+			}
 		}
 	}
 }
 
-func (c *RealtimeClient) startHeartbeat() {
-	c.hbTimer = time.NewTimer(c.config.HBInterval)
-	defer c.hbTimer.Stop()
+func (c *RealtimeClient) startHeartbeat(ctx context.Context) {
+	defer func() {
+		c.logger.Printf("Heartbeat goroutine terminated")
+	}()
+
+	ticker := time.NewTicker(c.config.HBInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case <-c.hbTimer.C:
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 			if err := c.SendHeartbeat(); err != nil {
 				c.logger.Printf("Error sending heartbeat: %v", err)
 				if c.config.AutoReconnect {
 					go c.reconnect()
 				}
+				return
 			}
-		case <-c.hbStop:
-			return
 		}
 	}
 }
@@ -235,7 +314,14 @@ func (c *RealtimeClient) SendHeartbeat() error {
 	if err != nil {
 		return err
 	}
-	return c.conn.Write(context.Background(), websocket.MessageText, data)
+
+	// Use connCtx if available for graceful shutdown awareness
+	writeCtx := context.Background()
+	if c.connCtx != nil {
+		writeCtx = c.connCtx
+	}
+
+	return c.conn.Write(writeCtx, websocket.MessageText, data)
 }
 
 func (c *RealtimeClient) reconnect() {
@@ -260,12 +346,47 @@ func (c *RealtimeClient) reconnect() {
 		cancel()
 
 		if err == nil {
-			// Rejoin all channels
+			// Sequential rejoin with error handling
 			c.mu.RLock()
+			channels := make([]*channel, 0, len(c.channels))
 			for _, ch := range c.channels {
-				go ch.rejoin()
+				channels = append(channels, ch)
 			}
 			c.mu.RUnlock()
+
+			successCount := 0
+			failureCount := 0
+			startTime := time.Now()
+
+			c.logger.Printf("[RECONNECT] Starting rejoin for %d channels", len(channels))
+
+			for _, ch := range channels {
+				rejoinStart := time.Now()
+				if err := ch.rejoin(); err != nil {
+					c.logger.Printf("[REJOIN_FAIL] channel=%s error=%v latency=%dms",
+						ch.topic, err, time.Since(rejoinStart).Milliseconds())
+					failureCount++
+
+					// Retry once
+					time.Sleep(500 * time.Millisecond)
+					retryStart := time.Now()
+					if retryErr := ch.rejoin(); retryErr != nil {
+						c.logger.Printf("[REJOIN_RETRY_FAIL] channel=%s error=%v latency=%dms",
+							ch.topic, retryErr, time.Since(retryStart).Milliseconds())
+					} else {
+						c.logger.Printf("[REJOIN_RETRY_SUCCESS] channel=%s latency=%dms",
+							ch.topic, time.Since(retryStart).Milliseconds())
+						successCount++
+					}
+				} else {
+					c.logger.Printf("[REJOIN_SUCCESS] channel=%s latency=%dms",
+						ch.topic, time.Since(rejoinStart).Milliseconds())
+					successCount++
+				}
+			}
+
+			c.logger.Printf("[RECONNECT_COMPLETE] success=%d failure=%d total_latency=%dms",
+				successCount, failureCount, time.Since(startTime).Milliseconds())
 			return
 		}
 
@@ -288,6 +409,20 @@ func (c *RealtimeClient) NextRef() int {
 	defer c.refMu.Unlock()
 	c.ref++
 	return c.ref
+}
+
+// registerAckHandler registers a handler for ACK responses with the given ref
+func (c *RealtimeClient) registerAckHandler(ref int, handler func(string, json.RawMessage)) {
+	c.ackHandlersMu.Lock()
+	defer c.ackHandlersMu.Unlock()
+	c.ackHandlers[ref] = handler
+}
+
+// unregisterAckHandler removes the ACK handler for the given ref
+func (c *RealtimeClient) unregisterAckHandler(ref int) {
+	c.ackHandlersMu.Lock()
+	defer c.ackHandlersMu.Unlock()
+	delete(c.ackHandlers, ref)
 }
 
 func (c *RealtimeClient) handleBroadcast(msg Message) {
