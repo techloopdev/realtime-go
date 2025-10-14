@@ -28,7 +28,11 @@ func main() {
 	if err := client.Connect(ctx); err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
-	defer client.Disconnect()
+	defer func() {
+		if err := client.Disconnect(); err != nil {
+			log.Printf("Failed to disconnect: %v", err)
+		}
+	}()
 
 	fmt.Println("Connected to Supabase Realtime server")
 
@@ -54,7 +58,7 @@ func main() {
 	}
 
 	// Listen for broadcast messages
-	channel.OnBroadcast("cursor", func(payload json.RawMessage) {
+	if err := channel.OnBroadcast("cursor", func(payload json.RawMessage) {
 		var cursorPosition struct {
 			X int `json:"x"`
 			Y int `json:"y"`
@@ -64,7 +68,9 @@ func main() {
 			return
 		}
 		fmt.Printf("Received cursor position: x=%d, y=%d\n", cursorPosition.X, cursorPosition.Y)
-	})
+	}); err != nil {
+		log.Fatalf("Failed to set broadcast handler: %v", err)
+	}
 
 	// Send a broadcast message every 2 seconds
 	go func() {

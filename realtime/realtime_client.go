@@ -515,9 +515,9 @@ func (c *RealtimeClient) SetConn(conn Conn) {
 }
 
 // ProcessMessage processes a single message from the WebSocket connection
-func (c *RealtimeClient) ProcessMessage(msg interface{}) {
+func (c *RealtimeClient) ProcessMessage(msg any) {
 	// Convert the message to a map
-	msgMap, ok := msg.(map[string]interface{})
+	msgMap, ok := msg.(map[string]any)
 	if !ok {
 		return
 	}

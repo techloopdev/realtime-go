@@ -27,7 +27,11 @@ func main() {
 	if err := client.Connect(ctx); err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}
-	defer client.Disconnect()
+	defer func() {
+		if err := client.Disconnect(); err != nil {
+			log.Printf("Failed to disconnect: %v", err)
+		}
+	}()
 
 	fmt.Println("Connected to Supabase Realtime server")
 
@@ -74,7 +78,7 @@ func main() {
 
 	// Track user presence
 	userId := fmt.Sprintf("user-%d", time.Now().Unix())
-	presenceData := map[string]interface{}{
+	presenceData := map[string]any{
 		"user_id":      userId,
 		"status":       "online",
 		"last_seen_at": time.Now().Format(time.RFC3339),
