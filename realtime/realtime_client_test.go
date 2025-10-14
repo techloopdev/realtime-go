@@ -29,9 +29,11 @@ func TestHandleBroadcast(t *testing.T) {
 	channel := client.Channel("test-channel", &ChannelConfig{})
 
 	broadcastReceived := false
-	channel.OnBroadcast("test-event", func(payload json.RawMessage) {
+	if err := channel.OnBroadcast("test-event", func(payload json.RawMessage) {
 		broadcastReceived = true
-	})
+	}); err != nil {
+		t.Fatalf("Failed to register broadcast handler: %v", err)
+	}
 
 	// Create a broadcast message
 	msg := map[string]interface{}{
@@ -78,9 +80,11 @@ func TestHandlePostgresChanges(t *testing.T) {
 	channel := client.Channel("test-channel", &ChannelConfig{})
 
 	changeReceived := false
-	channel.OnPostgresChange("INSERT", func(event PostgresChangeEvent) {
+	if err := channel.OnPostgresChange("INSERT", func(event PostgresChangeEvent) {
 		changeReceived = true
-	})
+	}); err != nil {
+		t.Fatalf("Failed to register postgres change handler: %v", err)
+	}
 
 	// Create a postgres changes message
 	msg := map[string]interface{}{
@@ -145,9 +149,11 @@ func TestHandleBroadcastDirect(t *testing.T) {
 	broadcastReceived := false
 
 	// Register broadcast handler
-	channel.OnBroadcast("test-event", func(payload json.RawMessage) {
+	if err := channel.OnBroadcast("test-event", func(payload json.RawMessage) {
 		broadcastReceived = true
-	})
+	}); err != nil {
+		t.Fatalf("Failed to register broadcast handler: %v", err)
+	}
 
 	// Create message payload
 	payload := json.RawMessage(`{"data":"test"}`)
@@ -240,11 +246,13 @@ func TestHandlePostgresChangesDirect(t *testing.T) {
 	changeReceived := false
 
 	// Register postgres change handler
-	channel.OnPostgresChange("INSERT", func(event PostgresChangeEvent) {
+	if err := channel.OnPostgresChange("INSERT", func(event PostgresChangeEvent) {
 		changeReceived = true
 		assert.Equal(t, "test_table", event.Table)
 		assert.Equal(t, "public", event.Schema)
-	})
+	}); err != nil {
+		t.Fatalf("Failed to register postgres change handler: %v", err)
+	}
 
 	// Create postgres changes payload
 	postgresPayload := `{
@@ -377,9 +385,11 @@ func TestHandleMessages(t *testing.T) {
 	broadcastReceived := false
 
 	// Register handler
-	broadcastCh.OnBroadcast("test-event", func(payload json.RawMessage) {
+	if err := broadcastCh.OnBroadcast("test-event", func(payload json.RawMessage) {
 		broadcastReceived = true
-	})
+	}); err != nil {
+		t.Fatalf("Failed to register broadcast handler: %v", err)
+	}
 
 	// Create a message payload
 	rawPayload := json.RawMessage(`{"data":"test"}`)
