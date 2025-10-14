@@ -63,7 +63,7 @@ type IRealtimeClient interface {
 	RemoveAllChannels() error
 
 	// ProcessMessage processes a single message from the WebSocket connection (for testing)
-	ProcessMessage(msg interface{})
+	ProcessMessage(msg any)
 }
 
 // Channel represents a realtime channel for subscriptions
@@ -81,7 +81,7 @@ type Channel interface {
 	OnPresence(callback func(PresenceEvent))
 
 	// Track registers the current client's presence
-	Track(payload interface{}) error
+	Track(payload any) error
 
 	// Untrack removes the current client's presence
 	Untrack() error
@@ -90,7 +90,7 @@ type Channel interface {
 	OnBroadcast(event string, callback func(json.RawMessage)) error
 
 	// SendBroadcast sends a broadcast message
-	SendBroadcast(event string, payload interface{}) error
+	SendBroadcast(event string, payload any) error
 
 	// OnPostgresChange registers a callback for Postgres CDC events
 	OnPostgresChange(event string, callback func(PostgresChangeEvent)) error
@@ -115,8 +115,8 @@ type Message struct {
 type PresenceEvent struct {
 	Type            string                 `json:"type"`
 	Key             string                 `json:"key"`
-	NewPresence     map[string]interface{} `json:"new_presence,omitempty"`
-	CurrentPresence map[string]interface{} `json:"current_presence,omitempty"`
+	NewPresence     map[string]any `json:"new_presence,omitempty"`
+	CurrentPresence map[string]any `json:"current_presence,omitempty"`
 }
 
 // PostgresChangeEvent represents a Postgres CDC event

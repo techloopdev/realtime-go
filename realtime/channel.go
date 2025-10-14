@@ -17,7 +17,7 @@ type channel struct {
 	client            *RealtimeClient
 	broadcastHandlers map[string]func(json.RawMessage)
 	postgresHandlers  map[string]func(PostgresChangeEvent)
-	callbacks         map[string][]interface{}
+	callbacks         map[string][]any
 	mu                sync.RWMutex
 	joinedOnce        bool
 	subscribed        bool
@@ -32,7 +32,7 @@ func newChannel(topic string, config *ChannelConfig, client *RealtimeClient) *ch
 		client:            client,
 		broadcastHandlers: make(map[string]func(json.RawMessage)),
 		postgresHandlers:  make(map[string]func(PostgresChangeEvent)),
-		callbacks:         make(map[string][]interface{}),
+		callbacks:         make(map[string][]any),
 	}
 }
 
@@ -85,11 +85,11 @@ func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, 
 	defer ch.client.unregisterAckHandler(ref)
 
 	subscribeMsg := struct {
-		Type    string      `json:"type"`
-		Topic   string      `json:"topic"`
-		Event   string      `json:"event"`
-		Ref     int         `json:"ref"`
-		Payload interface{} `json:"payload"`
+		Type    string `json:"type"`
+		Topic   string `json:"topic"`
+		Event   string `json:"event"`
+		Ref     int    `json:"ref"`
+		Payload any    `json:"payload"`
 	}{
 		Type:    "subscribe",
 		Topic:   ch.topic,
@@ -190,7 +190,7 @@ func (ch *channel) Unsubscribe() error {
 
 	// Clear all callbacks to prevent accumulation (CRIT-05)
 	ch.mu.Lock()
-	ch.callbacks = make(map[string][]interface{})
+	ch.callbacks = make(map[string][]any)
 	ch.mu.Unlock()
 
 	return nil
@@ -216,18 +216,18 @@ func (ch *channel) OnBroadcast(event string, callback func(json.RawMessage)) err
 
 	// Single-handler semantics (last-wins)
 	// Replace existing handler instead of appending
-	ch.callbacks[key] = []interface{}{callback}
+	ch.callbacks[key] = []any{callback}
 
 	return nil
 }
 
-func (ch *channel) SendBroadcast(event string, payload interface{}) error {
+func (ch *channel) SendBroadcast(event string, payload any) error {
 	broadcastMsg := struct {
-		Type    string      `json:"type"`
-		Topic   string      `json:"topic"`
-		Event   string      `json:"event"`
-		Payload interface{} `json:"payload"`
-		Ref     int         `json:"ref"`
+		Type    string `json:"type"`
+		Topic   string `json:"topic"`
+		Event   string `json:"event"`
+		Payload any    `json:"payload"`
+		Ref     int    `json:"ref"`
 	}{
 		Type:    "broadcast",
 		Topic:   ch.topic,
@@ -250,12 +250,12 @@ func (ch *channel) OnPostgresChange(event string, callback func(PostgresChangeEv
 	return nil
 }
 
-func (ch *channel) Track(payload interface{}) error {
+func (ch *channel) Track(payload any) error {
 	trackMsg := struct {
-		Type    string      `json:"type"`
-		Topic   string      `json:"topic"`
-		Event   string      `json:"event"`
-		Payload interface{} `json:"payload"`
+		Type    string `json:"type"`
+		Topic   string `json:"topic"`
+		Event   string `json:"event"`
+		Payload any    `json:"payload"`
 	}{
 		Type:    "track",
 		Topic:   ch.topic,
