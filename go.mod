@@ -4,7 +4,6 @@ go 1.22
 
 require (
 	github.com/stretchr/testify v1.10.0
-	github.com/supabase-community/realtime-go v0.1.0
 	nhooyr.io/websocket v1.8.14
 )
 
