@@ -155,15 +155,15 @@ func TestHandleBroadcastDirect(t *testing.T) {
 		t.Fatalf("Failed to register broadcast handler: %v", err)
 	}
 
-	// Create message payload
-	payload := json.RawMessage(`{"data":"test"}`)
+	// Create message payload with Supabase broadcast structure
+	broadcastPayload := json.RawMessage(`{"type":"broadcast","event":"test-event","payload":{"data":"test"}}`)
 
 	// Create and handle broadcast message directly
 	msg := Message{
 		Type:    "broadcast",
-		Topic:   "test-channel",
-		Event:   "test-event",
-		Payload: payload,
+		Topic:   TopicPrefix + "test-channel",
+		Event:   "broadcast",
+		Payload: broadcastPayload,
 	}
 
 	realtimeClient.handleBroadcast(msg)
@@ -172,19 +172,20 @@ func TestHandleBroadcastDirect(t *testing.T) {
 	// Test with non-existing channel
 	nonExistingMsg := Message{
 		Type:    "broadcast",
-		Topic:   "non-existing-channel",
-		Event:   "test-event",
-		Payload: payload,
+		Topic:   TopicPrefix + "non-existing-channel",
+		Event:   "broadcast",
+		Payload: broadcastPayload,
 	}
 	// This should not crash
 	realtimeClient.handleBroadcast(nonExistingMsg)
 
 	// Test with non-existing event
+	nonExistingEventPayload := json.RawMessage(`{"type":"broadcast","event":"non-existing-event","payload":{"data":"test"}}`)
 	nonExistingEvent := Message{
 		Type:    "broadcast",
-		Topic:   "test-channel",
-		Event:   "non-existing-event",
-		Payload: payload,
+		Topic:   TopicPrefix + "test-channel",
+		Event:   "broadcast",
+		Payload: nonExistingEventPayload,
 	}
 	// This should not crash
 	realtimeClient.handleBroadcast(nonExistingEvent)
@@ -209,7 +210,7 @@ func TestHandlePresenceDirect(t *testing.T) {
 	// Create and handle presence message directly
 	msg := Message{
 		Type:    "presence",
-		Topic:   "test-channel",
+		Topic:   TopicPrefix + "test-channel",
 		Event:   "presence",
 		Payload: json.RawMessage(presencePayload),
 	}
@@ -220,7 +221,7 @@ func TestHandlePresenceDirect(t *testing.T) {
 	// Test with non-existing channel
 	nonExistingMsg := Message{
 		Type:    "presence",
-		Topic:   "non-existing-channel",
+		Topic:   TopicPrefix + "non-existing-channel",
 		Event:   "presence",
 		Payload: json.RawMessage(presencePayload),
 	}
@@ -230,7 +231,7 @@ func TestHandlePresenceDirect(t *testing.T) {
 	// Test with invalid payload
 	invalidPayload := Message{
 		Type:    "presence",
-		Topic:   "test-channel",
+		Topic:   TopicPrefix + "test-channel",
 		Event:   "presence",
 		Payload: json.RawMessage(`{invalid-json}`),
 	}
@@ -266,7 +267,7 @@ func TestHandlePostgresChangesDirect(t *testing.T) {
 	// Create and handle postgres changes message directly
 	msg := Message{
 		Type:    "postgres_changes",
-		Topic:   "test-channel",
+		Topic:   TopicPrefix + "test-channel",
 		Event:   "postgres_changes",
 		Payload: json.RawMessage(postgresPayload),
 	}
@@ -277,7 +278,7 @@ func TestHandlePostgresChangesDirect(t *testing.T) {
 	// Test with non-existing channel
 	nonExistingMsg := Message{
 		Type:    "postgres_changes",
-		Topic:   "non-existing-channel",
+		Topic:   TopicPrefix + "non-existing-channel",
 		Event:   "postgres_changes",
 		Payload: json.RawMessage(postgresPayload),
 	}
@@ -287,7 +288,7 @@ func TestHandlePostgresChangesDirect(t *testing.T) {
 	// Test with invalid payload
 	invalidPayload := Message{
 		Type:    "postgres_changes",
-		Topic:   "test-channel",
+		Topic:   TopicPrefix + "test-channel",
 		Event:   "postgres_changes",
 		Payload: json.RawMessage(`{invalid-json}`),
 	}
@@ -391,15 +392,15 @@ func TestHandleMessages(t *testing.T) {
 		t.Fatalf("Failed to register broadcast handler: %v", err)
 	}
 
-	// Create a message payload
-	rawPayload := json.RawMessage(`{"data":"test"}`)
+	// Create a message payload with Supabase broadcast structure
+	broadcastPayload := json.RawMessage(`{"type":"broadcast","event":"test-event","payload":{"data":"test"}}`)
 
 	// Create and handle message directly using handler functions
 	broadcastMsg := Message{
 		Type:    "broadcast",
-		Topic:   "broadcast-channel",
-		Event:   "test-event",
-		Payload: rawPayload,
+		Topic:   TopicPrefix + "broadcast-channel",
+		Event:   "broadcast",
+		Payload: broadcastPayload,
 	}
 
 	// Process the message directly
