@@ -108,7 +108,7 @@ func TestChannelOnMessage(t *testing.T) {
 	// Add a mock message
 	broadcastMsg, _ := json.Marshal(map[string]interface{}{
 		"type":    "broadcast",
-		"topic":   "test-channel",
+		"topic":   TopicPrefix + "test-channel",
 		"event":   "test-event",
 		"payload": map[string]interface{}{"test": "data"},
 	})
@@ -117,7 +117,7 @@ func TestChannelOnMessage(t *testing.T) {
 	// Process the message
 	client.(*RealtimeClient).ProcessMessage(map[string]interface{}{
 		"type":    "broadcast",
-		"topic":   "test-channel",
+		"topic":   TopicPrefix + "test-channel",
 		"event":   "test-event",
 		"payload": map[string]interface{}{"test": "data"},
 	})
@@ -140,7 +140,7 @@ func TestChannelOnPresence(t *testing.T) {
 	// Add a mock presence event
 	presenceMsg, _ := json.Marshal(map[string]interface{}{
 		"type":  "presence",
-		"topic": "test-channel",
+		"topic": TopicPrefix + "test-channel",
 		"key":   "test-key",
 	})
 	mockConn.AddReadMessage(presenceMsg)
@@ -148,7 +148,7 @@ func TestChannelOnPresence(t *testing.T) {
 	// Process the message
 	client.(*RealtimeClient).ProcessMessage(map[string]interface{}{
 		"type":  "presence",
-		"topic": "test-channel",
+		"topic": TopicPrefix + "test-channel",
 		"key":   "test-key",
 	})
 
@@ -180,7 +180,7 @@ func TestChannelOnBroadcast(t *testing.T) {
 	// Add a mock broadcast response
 	broadcastResponse, _ := json.Marshal(map[string]interface{}{
 		"type":    "broadcast",
-		"topic":   "test-channel",
+		"topic":   TopicPrefix + "test-channel",
 		"event":   "test-event",
 		"payload": map[string]string{"test": "data"},
 	})
@@ -189,7 +189,7 @@ func TestChannelOnBroadcast(t *testing.T) {
 	// Process the message
 	client.(*RealtimeClient).ProcessMessage(map[string]interface{}{
 		"type":    "broadcast",
-		"topic":   "test-channel",
+		"topic":   TopicPrefix + "test-channel",
 		"event":   "test-event",
 		"payload": map[string]string{"test": "data"},
 	})
@@ -214,7 +214,7 @@ func TestChannelOnPostgresChange(t *testing.T) {
 	// Add a mock postgres change event
 	postgresMsg, _ := json.Marshal(map[string]interface{}{
 		"type":   "postgres_changes",
-		"topic":  "test-channel",
+		"topic":  TopicPrefix + "test-channel",
 		"table":  "test_table",
 		"schema": "public",
 	})
@@ -223,7 +223,7 @@ func TestChannelOnPostgresChange(t *testing.T) {
 	// Process the message
 	client.(*RealtimeClient).ProcessMessage(map[string]interface{}{
 		"type":   "postgres_changes",
-		"topic":  "test-channel",
+		"topic":  TopicPrefix + "test-channel",
 		"table":  "test_table",
 		"schema": "public",
 	})

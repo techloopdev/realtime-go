@@ -38,7 +38,7 @@ func TestHandleBroadcast(t *testing.T) {
 	// Create a broadcast message
 	msg := map[string]interface{}{
 		"type":    "broadcast",
-		"topic":   "test-channel",
+		"topic":   TopicPrefix + "test-channel",
 		"event":   "test-event",
 		"payload": map[string]string{"test": "data"},
 	}
@@ -63,7 +63,7 @@ func TestHandlePresence(t *testing.T) {
 	// Create a presence message
 	msg := map[string]interface{}{
 		"type":  "presence",
-		"topic": "test-channel",
+		"topic": TopicPrefix + "test-channel",
 		"key":   "test-key",
 	}
 
@@ -89,7 +89,7 @@ func TestHandlePostgresChanges(t *testing.T) {
 	// Create a postgres changes message
 	msg := map[string]interface{}{
 		"type":   "postgres_changes",
-		"topic":  "test-channel",
+		"topic":  TopicPrefix + "test-channel",
 		"table":  "test_table",
 		"schema": "public",
 	}
@@ -108,7 +108,7 @@ func TestProcessMessage(t *testing.T) {
 	// Create a message
 	msg := map[string]interface{}{
 		"type":    "message",
-		"topic":   "test-channel",
+		"topic":   TopicPrefix + "test-channel",
 		"event":   "test-event",
 		"payload": map[string]string{"test": "data"},
 	}
