@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.1.7-dam] - 2025-10-20
+
+### Fixed
+- **BLOCKER**: Phoenix Channel Protocol compliance - server crashes resolved
+  - Added required `payload` field to `heartbeat` messages (prevents GenServer crash)
+  - Added required `payload` field to `phx_leave` messages (prevents connection errors)
+  - Fixed broadcast message format with nested payload structure per Supabase protocol
+  - Implements Base64 decoding for Supabase broadcast payloads
+  - All Phoenix messages now include mandatory fields per protocol specification
+  - Prevents: `Phoenix.Socket.InvalidMessageError: missing key "payload"`
+  - Reference: https://hexdocs.pm/phoenix/Phoenix.Socket.Message.html
+- **CRITICAL**: FlexibleRef type for Phoenix protocol compatibility
+  - Handles both string and number `ref` values from Phoenix server responses
+  - Prevents unmarshaling errors: `cannot unmarshal number into Go struct field`
+  - Custom UnmarshalJSON implementation with proper error handling
+- **BREAKING**: Topic prefix "realtime:" now added automatically to all channels
+  - Internal implementation detail transparent to most API consumers
+  - `GetTopic()` now returns full topic with "realtime:" prefix
+  - Added `GetShortTopic()` helper for backward compatibility
+  - Required by Supabase Realtime protocol specification
+
+### Changed
+- Removed verbose DEBUG logging for production readiness
+  - Removed `[DEBUG_RX_ALL]`, `[DEBUG_PAYLOAD]`, `[DEBUG_BROADCAST_*]` logs
+  - Maintained error logging for troubleshooting (parsing errors, Base64 failures)
+  - Production-ready log levels following Go best practices 2025
+- Improved code comment quality and professionalism
+  - Removed emphatic "CRITICAL" markers (replaced with technical descriptions)
+  - Eliminated redundant inline comments
+  - Comments now describe current behavior, not implementation history
+  - Follows Effective Go comment guidelines
+
+### Testing
+- Fixed test suite for Phoenix protocol changes
+  - Updated `ackHandlers` map access from `int` to `string` keys
+  - Replaced domain-specific test data with generic hierarchical topics
+  - All 38 unit tests passing with protocol-compliant changes
+
+## [v0.1.4-dam] - Previous Release
+
 ### Added
 - Structured logging for all connection lifecycle events
   - `[SUBSCRIBE_START]`, `[SUBSCRIBE_ACK_OK]`, `[SUBSCRIBE_TIMEOUT]` with latency tracking
