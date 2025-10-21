@@ -3,6 +3,7 @@ package realtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -16,6 +17,10 @@ const (
 	ChannelStateErrored
 	ChannelStateJoined
 )
+
+// TopicPrefix is the required prefix for all Supabase Realtime channel topics
+// as per Phoenix Channel protocol specification
+const TopicPrefix = "realtime:"
 
 // SubscribeState represents the subscription state
 type SubscribeState int
@@ -34,7 +39,8 @@ type ChannelConfig struct {
 		Self bool `json:"self"`
 	} `json:"broadcast"`
 	Presence struct {
-		Key string `json:"key"`
+		Key     string `json:"key"`
+		Enabled bool   `json:"enabled"`
 	} `json:"presence"`
 	Private bool `json:"private"`
 }
@@ -98,8 +104,39 @@ type Channel interface {
 	// GetState returns the current state of the channel
 	GetState() ChannelState
 
-	// GetTopic returns the channel's topic
+	// GetTopic returns the full topic with TopicPrefix
 	GetTopic() string
+
+	// GetShortTopic returns the topic without TopicPrefix
+	GetShortTopic() string
+}
+
+// FlexibleRef is a type that can unmarshal from both string and number
+type FlexibleRef string
+
+// UnmarshalJSON implements custom unmarshaling to handle both string and number refs
+func (f *FlexibleRef) UnmarshalJSON(data []byte) error {
+	// Try to unmarshal as string first
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*f = FlexibleRef(s)
+		return nil
+	}
+
+	// Try to unmarshal as number
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = FlexibleRef(n.String())
+		return nil
+	}
+
+	// Both failed - return error
+	return fmt.Errorf("ref must be string or number, got: %s", string(data))
+}
+
+// String returns the string representation
+func (f FlexibleRef) String() string {
+	return string(f)
 }
 
 // Message represents a realtime message
@@ -107,7 +144,7 @@ type Message struct {
 	Type    string          `json:"type"`
 	Topic   string          `json:"topic"`
 	Event   string          `json:"event"`
-	Ref     int             `json:"ref,omitempty"`
+	Ref     FlexibleRef     `json:"ref,omitempty"` // Accepts both string and number from Phoenix
 	Payload json.RawMessage `json:"payload"`
 }
 
