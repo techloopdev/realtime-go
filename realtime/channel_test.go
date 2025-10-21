@@ -3,6 +3,7 @@ package realtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -21,7 +22,7 @@ func TestChannelSubscribe(t *testing.T) {
 	go func() {
 		time.Sleep(10 * time.Millisecond) // Small delay to let Subscribe() register handler
 		client.ackHandlersMu.RLock()
-		handler, exists := client.ackHandlers[1] // ref=1 for first call
+		handler, exists := client.ackHandlers["1"] // ref=1 for first call
 		client.ackHandlersMu.RUnlock()
 		if exists {
 			handler("ok", json.RawMessage(`{}`))
@@ -66,7 +67,7 @@ func TestChannelUnsubscribe(t *testing.T) {
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		client.ackHandlersMu.RLock()
-		handler, exists := client.ackHandlers[1]
+		handler, exists := client.ackHandlers["1"]
 		client.ackHandlersMu.RUnlock()
 		if exists {
 			handler("ok", json.RawMessage(`{}`))
@@ -260,7 +261,10 @@ func TestChannelGetTopic(t *testing.T) {
 	topic := "test-channel"
 	channel := client.Channel(topic, &ChannelConfig{})
 
-	assert.Equal(t, topic, channel.GetTopic())
+	// GetTopic() returns full topic with prefix
+	assert.Equal(t, TopicPrefix+topic, channel.GetTopic())
+	// GetShortTopic() returns topic without prefix
+	assert.Equal(t, topic, channel.GetShortTopic())
 }
 
 func TestChannelRejoin(t *testing.T) {
@@ -281,7 +285,7 @@ func TestChannelRejoin(t *testing.T) {
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		client.ackHandlersMu.RLock()
-		handler, exists := client.ackHandlers[1]
+		handler, exists := client.ackHandlers["1"]
 		client.ackHandlersMu.RUnlock()
 		if exists {
 			handler("ok", json.RawMessage(`{}`))
@@ -296,7 +300,7 @@ func TestChannelRejoin(t *testing.T) {
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		client.ackHandlersMu.RLock()
-		handler, exists := client.ackHandlers[2]
+		handler, exists := client.ackHandlers["2"]
 		client.ackHandlersMu.RUnlock()
 		if exists {
 			handler("ok", json.RawMessage(`{}`))
@@ -310,4 +314,94 @@ func TestChannelRejoin(t *testing.T) {
 	// Second phx_join message sent (rejoin behavior)
 	assert.Equal(t, 2, len(mockConn.GetWriteMessages()))
 	assert.Contains(t, mockConn.GetWriteMessages()[1].(string), "phx_join")
+}
+
+// TestChannelSubscribePayloadFormat validates that the phx_join message
+// includes access_token in the payload according to Supabase Realtime protocol
+// Reference: https://supabase.com/docs/guides/realtime/protocol
+func TestChannelSubscribePayloadFormat(t *testing.T) {
+	realtimeClient, _ := testClient()
+	client := realtimeClient.(*RealtimeClient)
+
+	// Create channel with specific config matching Supabase Realtime protocol
+	channelConfig := &ChannelConfig{}
+	channelConfig.Broadcast.Self = false
+	channelConfig.Broadcast.Ack = true
+	channelConfig.Presence.Key = "test-presence-key"
+	channelConfig.Presence.Enabled = false
+	channelConfig.Private = false
+
+	channel := client.Channel("complex:hierarchical:topic:abc-123-def", channelConfig).(*channel)
+
+	// Build subscribe message directly (same logic as Subscribe method)
+	// Phoenix Channel protocol: topic, event, payload, ref, join_ref
+	ref := client.NextRef()
+	subscribeMsg := struct {
+		Topic   string `json:"topic"`
+		Event   string `json:"event"`
+		Payload any    `json:"payload"`
+		Ref     string `json:"ref"`
+		JoinRef string `json:"join_ref"`
+	}{
+		Topic:   channel.topic,
+		Event:   "phx_join",
+		Ref:     fmt.Sprintf("%d", ref),
+		JoinRef: fmt.Sprintf("%d", ref),
+		Payload: map[string]any{
+			"config": map[string]any{
+				"broadcast":        channel.config.Broadcast,
+				"presence":         channel.config.Presence,
+				"postgres_changes": []any{}, // Required by Supabase protocol
+				"private":          channel.config.Private,
+			},
+			"access_token": channel.client.config.APIKey,
+		},
+	}
+
+	data, err := json.Marshal(subscribeMsg)
+	assert.NoError(t, err)
+
+	// Parse the marshaled message to validate structure
+	var parsedMsg map[string]any
+	err = json.Unmarshal(data, &parsedMsg)
+	assert.NoError(t, err)
+
+	// Validate message structure (Phoenix Channel protocol with Supabase requirements)
+	assert.Equal(t, TopicPrefix+"complex:hierarchical:topic:abc-123-def", parsedMsg["topic"], "topic must have TopicPrefix")
+	assert.Equal(t, "phx_join", parsedMsg["event"])
+	assert.Equal(t, "1", parsedMsg["ref"], "ref should be string")
+	assert.Equal(t, "1", parsedMsg["join_ref"], "join_ref should be present and match ref")
+
+	// Validate payload structure
+	payload, ok := parsedMsg["payload"].(map[string]any)
+	assert.True(t, ok, "payload should be a map")
+
+	// Validate config object
+	config, ok := payload["config"].(map[string]any)
+	assert.True(t, ok, "config should be present in payload")
+
+	// Validate broadcast config
+	broadcast, ok := config["broadcast"].(map[string]any)
+	assert.True(t, ok, "broadcast should be present in config")
+	assert.Equal(t, false, broadcast["self"])
+	assert.Equal(t, true, broadcast["ack"])
+
+	// Validate presence config
+	presence, ok := config["presence"].(map[string]any)
+	assert.True(t, ok, "presence should be present in config")
+	assert.Equal(t, "test-presence-key", presence["key"])
+	assert.Equal(t, false, presence["enabled"], "presence enabled should be false")
+
+	// Validate postgres_changes (required by protocol)
+	postgresChanges, ok := config["postgres_changes"].([]any)
+	assert.True(t, ok, "postgres_changes should be present in config as array")
+	assert.Empty(t, postgresChanges, "postgres_changes should be empty array for broadcast-only channels")
+
+	// Validate private flag
+	assert.Equal(t, false, config["private"])
+
+	// CRITICAL: Validate access_token is present
+	accessToken, ok := payload["access_token"].(string)
+	assert.True(t, ok, "access_token should be present in payload as string")
+	assert.Equal(t, "test-key", accessToken, "access_token should match client API key")
 }

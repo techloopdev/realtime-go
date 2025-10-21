@@ -40,7 +40,8 @@ func TestClientChannel(t *testing.T) {
 	channel := client.Channel("test-channel", &ChannelConfig{})
 	assert.NotNil(t, channel)
 	channels := client.GetChannels()
-	assert.Equal(t, channel, channels["test-channel"])
+	// Channels are stored with TopicPrefix
+	assert.Equal(t, channel, channels[TopicPrefix+"test-channel"])
 }
 
 func TestClientSetAuth(t *testing.T) {
@@ -54,7 +55,8 @@ func TestClientGetChannels(t *testing.T) {
 	channel := client.Channel("test-channel", &ChannelConfig{})
 	channels := client.GetChannels()
 	assert.Len(t, channels, 1)
-	assert.Equal(t, channel, channels["test-channel"])
+	// Channels are stored with TopicPrefix
+	assert.Equal(t, channel, channels[TopicPrefix+"test-channel"])
 }
 
 func TestClientRemoveChannel(t *testing.T) {
