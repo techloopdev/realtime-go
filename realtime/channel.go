@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,8 +26,12 @@ type channel struct {
 }
 
 func newChannel(topic string, config *ChannelConfig, client *RealtimeClient) *channel {
+	// Supabase Realtime requires TopicPrefix for all channel topics
+	// Reference: Official JavaScript library always adds this prefix
+	fullTopic := TopicPrefix + topic
+
 	return &channel{
-		topic:             topic,
+		topic:             fullTopic,
 		state:             ChannelStateClosed,
 		config:            config,
 		client:            client,
@@ -84,18 +89,30 @@ func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, 
 	})
 	defer ch.client.unregisterAckHandler(ref)
 
+	// Build join payload according to Supabase Realtime protocol
+	// Reference: https://supabase.com/docs/guides/realtime/protocol
+	// Phoenix Channel protocol requires: topic, event, payload, ref, join_ref
+	// The payload must include config (broadcast, presence, postgres_changes, private) and access_token
 	subscribeMsg := struct {
-		Type    string `json:"type"`
 		Topic   string `json:"topic"`
 		Event   string `json:"event"`
-		Ref     int    `json:"ref"`
 		Payload any    `json:"payload"`
+		Ref     string `json:"ref"`
+		JoinRef string `json:"join_ref"`
 	}{
-		Type:    "subscribe",
 		Topic:   ch.topic,
 		Event:   "phx_join",
-		Ref:     ref,
-		Payload: ch.config,
+		Ref:     fmt.Sprintf("%d", ref),
+		JoinRef: fmt.Sprintf("%d", ref),
+		Payload: map[string]any{
+			"config": map[string]any{
+				"broadcast":        ch.config.Broadcast,
+				"presence":         ch.config.Presence,
+				"postgres_changes": []any{},
+				"private":          ch.config.Private,
+			},
+			"access_token": ch.client.config.APIKey,
+		},
 	}
 
 	data, err := json.Marshal(subscribeMsg)
@@ -166,14 +183,17 @@ func (ch *channel) Unsubscribe() error {
 	ch.state = ChannelStateLeaving
 	ch.mu.Unlock()
 
+	// Phoenix protocol requires payload field in all messages
 	unsubscribeMsg := struct {
-		Type  string `json:"type"`
-		Topic string `json:"topic"`
-		Event string `json:"event"`
+		Topic   string         `json:"topic"`
+		Event   string         `json:"event"`
+		Payload map[string]any `json:"payload"`
+		Ref     string         `json:"ref"`
 	}{
-		Type:  "unsubscribe",
-		Topic: ch.topic,
-		Event: "phx_leave",
+		Topic:   ch.topic,
+		Event:   "phx_leave",
+		Payload: map[string]any{},
+		Ref:     fmt.Sprintf("%d", ch.client.NextRef()),
 	}
 
 	data, err := json.Marshal(unsubscribeMsg)
@@ -222,18 +242,22 @@ func (ch *channel) OnBroadcast(event string, callback func(json.RawMessage)) err
 }
 
 func (ch *channel) SendBroadcast(event string, payload any) error {
+	// Phoenix Channel broadcast message format
+	// Reference: https://supabase.com/docs/guides/realtime/protocol
 	broadcastMsg := struct {
-		Type    string `json:"type"`
 		Topic   string `json:"topic"`
 		Event   string `json:"event"`
 		Payload any    `json:"payload"`
-		Ref     int    `json:"ref"`
+		Ref     string `json:"ref"`
 	}{
-		Type:    "broadcast",
-		Topic:   ch.topic,
-		Event:   event,
-		Payload: payload,
-		Ref:     ch.client.NextRef(),
+		Topic: ch.topic,
+		Event: "broadcast",
+		Payload: map[string]any{
+			"type":    "broadcast",
+			"event":   event,
+			"payload": payload,
+		},
+		Ref: fmt.Sprintf("%d", ch.client.NextRef()),
 	}
 
 	data, err := json.Marshal(broadcastMsg)
@@ -251,13 +275,12 @@ func (ch *channel) OnPostgresChange(event string, callback func(PostgresChangeEv
 }
 
 func (ch *channel) Track(payload any) error {
+	// Phoenix Channel protocol: track event for presence
 	trackMsg := struct {
-		Type    string `json:"type"`
 		Topic   string `json:"topic"`
 		Event   string `json:"event"`
 		Payload any    `json:"payload"`
 	}{
-		Type:    "track",
 		Topic:   ch.topic,
 		Event:   "track",
 		Payload: payload,
@@ -271,12 +294,11 @@ func (ch *channel) Track(payload any) error {
 }
 
 func (ch *channel) Untrack() error {
+	// Phoenix Channel protocol: untrack event for presence
 	untrackMsg := struct {
-		Type  string `json:"type"`
 		Topic string `json:"topic"`
 		Event string `json:"event"`
 	}{
-		Type:  "untrack",
 		Topic: ch.topic,
 		Event: "untrack",
 	}
@@ -315,7 +337,12 @@ func (ch *channel) rejoin() error {
 	})
 }
 
-// GetTopic returns the channel's topic
+// GetTopic returns the full topic with TopicPrefix
 func (c *channel) GetTopic() string {
 	return c.topic
+}
+
+// GetShortTopic returns the topic without TopicPrefix
+func (c *channel) GetShortTopic() string {
+	return strings.TrimPrefix(c.topic, TopicPrefix)
 }

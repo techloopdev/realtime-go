@@ -2,6 +2,7 @@ package realtime
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -35,7 +36,7 @@ type RealtimeClient struct {
 	reconnMu       sync.Mutex
 	isReconnecting bool
 	logger         *log.Logger
-	ackHandlers    map[int]func(string, json.RawMessage)
+	ackHandlers    map[string]func(string, json.RawMessage) // String ref per Phoenix protocol
 	ackHandlersMu  sync.RWMutex
 }
 
@@ -53,7 +54,7 @@ func NewRealtimeClient(projectRef string, apiKey string) IRealtimeClient {
 		config:      config,
 		channels:    make(map[string]*channel),
 		logger:      log.Default(),
-		ackHandlers: make(map[int]func(string, json.RawMessage)),
+		ackHandlers: make(map[string]func(string, json.RawMessage)),
 	}
 }
 
@@ -157,12 +158,15 @@ func (c *RealtimeClient) Channel(topic string, config *ChannelConfig) Channel {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if ch, exists := c.channels[topic]; exists {
+	// Check if channel already exists (with full topic including prefix)
+	fullTopic := TopicPrefix + topic
+	if ch, exists := c.channels[fullTopic]; exists {
 		return ch
 	}
 
 	ch := newChannel(topic, config, c)
-	c.channels[topic] = ch
+	// Save channel with full topic (matching ch.topic)
+	c.channels[ch.topic] = ch
 	return ch
 }
 
@@ -242,7 +246,7 @@ func (c *RealtimeClient) handleMessages(ctx context.Context) {
 			// Handle phx_reply events (ACK responses)
 			if msg.Event == "phx_reply" {
 				c.ackHandlersMu.RLock()
-				handler, exists := c.ackHandlers[msg.Ref]
+				handler, exists := c.ackHandlers[msg.Ref.String()]
 				c.ackHandlersMu.RUnlock()
 
 				if exists {
@@ -267,6 +271,11 @@ func (c *RealtimeClient) handleMessages(ctx context.Context) {
 				c.handlePresence(msg)
 			case "postgres_changes":
 				c.handlePostgresChanges(msg)
+			}
+
+			// Also handle by event (Supabase sends broadcasts with event="broadcast")
+			if msg.Event == "broadcast" {
+				c.handleBroadcast(msg)
 			}
 		}
 	}
@@ -298,16 +307,17 @@ func (c *RealtimeClient) startHeartbeat(ctx context.Context) {
 
 // SendHeartbeat sends a heartbeat message to the server
 func (c *RealtimeClient) SendHeartbeat() error {
+	// Phoenix protocol requires payload field in all messages
 	heartbeatMsg := struct {
-		Type  string `json:"type"`
-		Topic string `json:"topic"`
-		Event string `json:"event"`
-		Ref   int    `json:"ref"`
+		Topic   string         `json:"topic"`
+		Event   string         `json:"event"`
+		Payload map[string]any `json:"payload"`
+		Ref     int            `json:"ref"`
 	}{
-		Type:  "heartbeat",
-		Topic: "phoenix",
-		Event: "heartbeat",
-		Ref:   c.NextRef(),
+		Topic:   "phoenix",
+		Event:   "heartbeat",
+		Payload: map[string]any{},
+		Ref:     c.NextRef(),
 	}
 
 	data, err := json.Marshal(heartbeatMsg)
@@ -415,14 +425,14 @@ func (c *RealtimeClient) NextRef() int {
 func (c *RealtimeClient) registerAckHandler(ref int, handler func(string, json.RawMessage)) {
 	c.ackHandlersMu.Lock()
 	defer c.ackHandlersMu.Unlock()
-	c.ackHandlers[ref] = handler
+	c.ackHandlers[fmt.Sprintf("%d", ref)] = handler
 }
 
 // unregisterAckHandler removes the ACK handler for the given ref
 func (c *RealtimeClient) unregisterAckHandler(ref int) {
 	c.ackHandlersMu.Lock()
 	defer c.ackHandlersMu.Unlock()
-	delete(c.ackHandlers, ref)
+	delete(c.ackHandlers, fmt.Sprintf("%d", ref))
 }
 
 func (c *RealtimeClient) handleBroadcast(msg Message) {
@@ -434,17 +444,46 @@ func (c *RealtimeClient) handleBroadcast(msg Message) {
 		return
 	}
 
+	// Parse broadcast payload structure: {type:"broadcast", event:"message", payload:{...}}
+	var broadcastData struct {
+		Type    string          `json:"type"`
+		Event   string          `json:"event"`
+		Payload json.RawMessage `json:"payload"`
+	}
+
+	if err := json.Unmarshal(msg.Payload, &broadcastData); err != nil {
+		c.logger.Printf("Error parsing broadcast payload: %v", err)
+		return
+	}
+
+	// Decode Base64 payload if it's a string (Supabase encodes broadcast payloads)
+	var actualPayload json.RawMessage
+	var payloadStr string
+	if err := json.Unmarshal(broadcastData.Payload, &payloadStr); err == nil {
+		// It's a string - decode from Base64
+		decoded, decodeErr := base64.StdEncoding.DecodeString(payloadStr)
+		if decodeErr != nil {
+			c.logger.Printf("Error decoding Base64 payload: %v", decodeErr)
+			return
+		}
+		actualPayload = json.RawMessage(decoded)
+	} else {
+		// It's already JSON - use as is
+		actualPayload = broadcastData.Payload
+	}
+
 	ch.mu.RLock()
-	callbacks, exists := ch.callbacks["broadcast:"+msg.Event]
+	callbacks, exists := ch.callbacks["broadcast:"+broadcastData.Event]
 	ch.mu.RUnlock()
 
 	if !exists {
+		c.logger.Printf("No handler for event: %s", broadcastData.Event)
 		return
 	}
 
 	for _, callback := range callbacks {
 		if cb, ok := callback.(func(json.RawMessage)); ok {
-			cb(msg.Payload)
+			cb(actualPayload)
 		}
 	}
 }
