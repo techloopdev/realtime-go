@@ -41,13 +41,17 @@ func newChannel(topic string, config *ChannelConfig, client *RealtimeClient) *ch
 	}
 }
 
-// getWriteContext returns connCtx if available, fallback to Background
-// Respects connection lifecycle for graceful shutdown
-func (ch *channel) getWriteContext() context.Context {
-	if ch.client.connCtx != nil {
-		return ch.client.connCtx
+// getConnForWrite returns the connection and write context, both read under client's mutex.
+// Returns nil conn if no active connection exists.
+func (ch *channel) getConnForWrite() (Conn, context.Context) {
+	ch.client.mu.RLock()
+	conn := ch.client.conn
+	connCtx := ch.client.connCtx
+	ch.client.mu.RUnlock()
+	if connCtx != nil {
+		return conn, connCtx
 	}
-	return context.Background()
+	return conn, context.Background()
 }
 
 func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, error)) error {
@@ -120,7 +124,20 @@ func (ch *channel) Subscribe(ctx context.Context, callback func(SubscribeState, 
 		return err
 	}
 
-	if err := ch.client.conn.Write(ctx, websocket.MessageText, data); err != nil {
+	ch.client.mu.RLock()
+	conn := ch.client.conn
+	ch.client.mu.RUnlock()
+	if conn == nil {
+		ch.mu.Lock()
+		ch.state = ChannelStateErrored
+		ch.mu.Unlock()
+		connErr := fmt.Errorf("no active connection")
+		if callback != nil {
+			callback(SubscribeStateChannelError, connErr)
+		}
+		return connErr
+	}
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
 		ch.mu.Lock()
 		ch.state = ChannelStateErrored
 		ch.mu.Unlock()
@@ -201,7 +218,11 @@ func (ch *channel) Unsubscribe() error {
 		return err
 	}
 
-	if err := ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data); err != nil {
+	conn, writeCtx := ch.getConnForWrite()
+	if conn == nil {
+		return fmt.Errorf("no active connection")
+	}
+	if err := conn.Write(writeCtx, websocket.MessageText, data); err != nil {
 		return err
 	}
 
@@ -264,7 +285,11 @@ func (ch *channel) SendBroadcast(event string, payload any) error {
 	if err != nil {
 		return err
 	}
-	return ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data)
+	conn, writeCtx := ch.getConnForWrite()
+	if conn == nil {
+		return fmt.Errorf("no active connection")
+	}
+	return conn.Write(writeCtx, websocket.MessageText, data)
 }
 
 func (ch *channel) OnPostgresChange(event string, callback func(PostgresChangeEvent)) error {
@@ -290,7 +315,11 @@ func (ch *channel) Track(payload any) error {
 	if err != nil {
 		return err
 	}
-	return ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data)
+	conn, writeCtx := ch.getConnForWrite()
+	if conn == nil {
+		return fmt.Errorf("no active connection")
+	}
+	return conn.Write(writeCtx, websocket.MessageText, data)
 }
 
 func (ch *channel) Untrack() error {
@@ -307,7 +336,11 @@ func (ch *channel) Untrack() error {
 	if err != nil {
 		return err
 	}
-	return ch.client.conn.Write(ch.getWriteContext(), websocket.MessageText, data)
+	conn, writeCtx := ch.getConnForWrite()
+	if conn == nil {
+		return fmt.Errorf("no active connection")
+	}
+	return conn.Write(writeCtx, websocket.MessageText, data)
 }
 
 func (ch *channel) GetState() ChannelState {

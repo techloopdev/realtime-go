@@ -68,7 +68,12 @@ func (c *RealtimeClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("client is already reconnecting")
 	}
 	c.reconnMu.Unlock()
+	return c.connectInternal(ctx)
+}
 
+// connectInternal performs the actual WebSocket connection without checking isReconnecting.
+// Called by Connect() for external callers and by reconnect() for internal reconnection.
+func (c *RealtimeClient) connectInternal(ctx context.Context) error {
 	opts := &websocket.DialOptions{
 		HTTPHeader: make(map[string][]string),
 	}
@@ -97,10 +102,11 @@ func (c *RealtimeClient) Connect(ctx context.Context) error {
 	// Create connection-scoped context and assign connection (all under same lock)
 	c.connCtx, c.connCancel = context.WithCancel(context.Background())
 	c.conn = &websocketConnWrapper{conn}
+	connCtx := c.connCtx // Capture while holding lock to prevent data race
 	c.mu.Unlock()
 
-	go c.handleMessages(c.connCtx)
-	go c.startHeartbeat(c.connCtx)
+	go c.handleMessages(connCtx)
+	go c.startHeartbeat(connCtx)
 
 	return nil
 }
@@ -147,10 +153,13 @@ func (c *RealtimeClient) Disconnect() error {
 		time.Sleep(gracePeriod)
 	}
 
-	// Step 3: Cancel connection context to stop goroutines
+	// Step 3: Cancel connection context and clear references to prevent stale reads
 	c.mu.Lock()
 	connCancel := c.connCancel
 	conn := c.conn
+	c.conn = nil
+	c.connCancel = nil
+	c.connCtx = nil
 	c.mu.Unlock()
 
 	if connCancel != nil {
@@ -195,6 +204,22 @@ func (c *RealtimeClient) OnDisconnect(callback func(err error)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onDisconnect = callback
+}
+
+// invokeOnDisconnect safely calls the onDisconnect callback with panic recovery
+func (c *RealtimeClient) invokeOnDisconnect(err error) {
+	c.mu.RLock()
+	cb := c.onDisconnect
+	c.mu.RUnlock()
+	if cb == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Printf("[CRITICAL] OnDisconnect callback panicked: %v\nstack: %s", r, debug.Stack())
+		}
+	}()
+	cb(err)
 }
 
 // Channel creates a new channel for realtime subscriptions
@@ -429,7 +454,7 @@ func (c *RealtimeClient) reconnect() {
 	backoff := c.config.InitialBackoff
 	for i := 0; i < c.config.MaxRetries; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
-		err := c.Connect(ctx)
+		err := c.connectInternal(ctx)
 		cancel()
 
 		if err == nil {
@@ -463,6 +488,7 @@ func (c *RealtimeClient) reconnect() {
 					} else {
 						c.logger.Printf("[REJOIN_RETRY_SUCCESS] channel=%s latency=%dms",
 							ch.topic, time.Since(retryStart).Milliseconds())
+						failureCount-- // Undo increment from first attempt that was recovered by retry
 						successCount++
 					}
 				} else {
@@ -485,19 +511,7 @@ func (c *RealtimeClient) reconnect() {
 			if failureCount > 0 && successCount == 0 && len(channels) > 0 {
 				rejoinErr := fmt.Errorf("reconnected but all %d channel rejoins failed", failureCount)
 				c.logger.Printf("[RECONNECT_DEGRADED] %v", rejoinErr)
-				c.mu.RLock()
-				cb := c.onDisconnect
-				c.mu.RUnlock()
-				if cb != nil {
-					func() {
-						defer func() {
-							if r := recover(); r != nil {
-								c.logger.Printf("[CRITICAL] OnDisconnect callback panicked: %v\nstack: %s", r, debug.Stack())
-							}
-						}()
-						cb(rejoinErr)
-					}()
-				}
+				c.invokeOnDisconnect(rejoinErr)
 			}
 			return
 		}
@@ -515,20 +529,7 @@ func (c *RealtimeClient) reconnect() {
 	reconnectErr := fmt.Errorf("failed to reconnect after %d attempts", c.config.MaxRetries)
 	c.logger.Printf("%v", reconnectErr)
 
-	// Notify consumer that connection is permanently dead (panic-safe)
-	c.mu.RLock()
-	cb := c.onDisconnect
-	c.mu.RUnlock()
-	if cb != nil {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					c.logger.Printf("[CRITICAL] OnDisconnect callback panicked: %v\nstack: %s", r, debug.Stack())
-				}
-			}()
-			cb(reconnectErr)
-		}()
-	}
+	c.invokeOnDisconnect(reconnectErr)
 }
 
 // NextRef returns the next reference number for messages

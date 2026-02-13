@@ -18,14 +18,17 @@ func TestChannelSubscribe(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Simulate ACK response from server
+	// Simulate ACK response from server by polling for the registered handler
 	go func() {
-		time.Sleep(10 * time.Millisecond) // Small delay to let Subscribe() register handler
-		client.ackHandlersMu.RLock()
-		handler, exists := client.ackHandlers["1"] // ref=1 for first call
-		client.ackHandlersMu.RUnlock()
-		if exists {
-			handler("ok", json.RawMessage(`{}`))
+		for i := 0; i < 200; i++ {
+			time.Sleep(10 * time.Millisecond)
+			client.ackHandlersMu.RLock()
+			handler, exists := client.ackHandlers["1"] // ref=1 for first call
+			client.ackHandlersMu.RUnlock()
+			if exists {
+				handler("ok", json.RawMessage(`{}`))
+				return
+			}
 		}
 	}()
 
