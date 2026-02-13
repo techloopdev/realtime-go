@@ -38,6 +38,7 @@ type RealtimeClient struct {
 	logger         *log.Logger
 	ackHandlers    map[string]func(string, json.RawMessage) // String ref per Phoenix protocol
 	ackHandlersMu  sync.RWMutex
+	onDisconnect   func(err error) // Called when reconnect exhausts all retries
 }
 
 // NewRealtimeClient creates a new RealtimeClient instance
@@ -81,6 +82,11 @@ func (c *RealtimeClient) Connect(ctx context.Context) error {
 	conn, _, err := websocket.Dial(ctx, c.config.URL, opts)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
+	}
+
+	// Cancel previous connection context to stop old goroutines
+	if c.connCancel != nil {
+		c.connCancel()
 	}
 
 	// Create connection-scoped context
@@ -151,6 +157,21 @@ func (c *RealtimeClient) Disconnect() error {
 		unsubscribeCount, time.Since(startTime).Milliseconds())
 
 	return closeErr
+}
+
+// Ping performs an active WebSocket ping to verify connection liveness
+func (c *RealtimeClient) Ping(ctx context.Context) error {
+	if c.conn == nil {
+		return fmt.Errorf("no active connection")
+	}
+	return c.conn.Ping(ctx)
+}
+
+// OnDisconnect registers a callback invoked when all reconnection attempts fail
+func (c *RealtimeClient) OnDisconnect(callback func(err error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onDisconnect = callback
 }
 
 // Channel creates a new channel for realtime subscriptions
@@ -410,7 +431,16 @@ func (c *RealtimeClient) reconnect() {
 		}
 	}
 
-	c.logger.Printf("Failed to reconnect after %d attempts", c.config.MaxRetries)
+	reconnectErr := fmt.Errorf("failed to reconnect after %d attempts", c.config.MaxRetries)
+	c.logger.Printf("%v", reconnectErr)
+
+	// Notify consumer that connection is permanently dead
+	c.mu.RLock()
+	cb := c.onDisconnect
+	c.mu.RUnlock()
+	if cb != nil {
+		cb(reconnectErr)
+	}
 }
 
 // NextRef returns the next reference number for messages

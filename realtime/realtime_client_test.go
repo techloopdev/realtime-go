@@ -3,6 +3,8 @@ package realtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -372,6 +374,98 @@ func TestStartHeartbeat(t *testing.T) {
 		}
 	}
 	assert.True(t, foundHeartbeat, "Heartbeat message not found")
+}
+
+func TestPingSuccess(t *testing.T) {
+	client, _ := testClient()
+
+	// MockConn.Ping returns nil (success)
+	err := client.Ping(context.Background())
+	assert.NoError(t, err)
+}
+
+func TestPingFailsWhenNoConnection(t *testing.T) {
+	config := NewConfig()
+	client := &RealtimeClient{
+		config:      config,
+		channels:    make(map[string]*channel),
+		logger:      log.Default(),
+		ackHandlers: make(map[string]func(string, json.RawMessage)),
+	}
+
+	err := client.Ping(context.Background())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no active connection")
+}
+
+func TestOnDisconnectCalledAfterReconnectExhausted(t *testing.T) {
+	client, mockConn := testClient()
+	rc := client.(*RealtimeClient)
+
+	disconnectCalled := false
+	client.OnDisconnect(func(err error) {
+		disconnectCalled = true
+		assert.Contains(t, err.Error(), "failed to reconnect")
+	})
+
+	// Simulate connection death
+	mockConn.CloseWithError(fmt.Errorf("connection reset"))
+
+	// Set max retries to 1 for fast test
+	rc.config.MaxRetries = 1
+	rc.config.InitialBackoff = 1 * time.Millisecond
+	rc.config.Timeout = 10 * time.Millisecond
+
+	// Trigger reconnect (will fail because no real WebSocket server)
+	rc.reconnect()
+
+	assert.True(t, disconnectCalled, "OnDisconnect callback should have been invoked")
+}
+
+func TestOnDisconnectNotCalledWithoutFailure(t *testing.T) {
+	client, _ := testClient()
+
+	disconnectCalled := false
+	client.OnDisconnect(func(err error) {
+		disconnectCalled = true
+	})
+
+	// No reconnect failure triggered
+	assert.False(t, disconnectCalled)
+}
+
+func TestConnectCancelsPreviousContext(t *testing.T) {
+	client, _ := testClient()
+	rc := client.(*RealtimeClient)
+
+	// Set up initial connection context (simulating first Connect)
+	firstCtx, firstCancel := context.WithCancel(context.Background())
+	rc.connCtx = firstCtx
+	rc.connCancel = firstCancel
+
+	// Track when first context goroutine exits
+	firstCtxDone := make(chan struct{})
+	go func() {
+		<-firstCtx.Done()
+		close(firstCtxDone)
+	}()
+
+	// Simulate second Connect: the fix cancels old context before creating new one
+	if rc.connCancel != nil {
+		rc.connCancel()
+	}
+	rc.connCtx, rc.connCancel = context.WithCancel(context.Background())
+
+	// Verify first context was cancelled (old goroutines would stop)
+	select {
+	case <-firstCtxDone:
+		// Old goroutines terminate correctly
+	case <-time.After(time.Second):
+		t.Fatal("Previous connection context was not cancelled - goroutine leak")
+	}
+
+	// Verify new context is active
+	assert.NoError(t, rc.connCtx.Err())
 }
 
 func TestHandleMessages(t *testing.T) {

@@ -70,6 +70,12 @@ type IRealtimeClient interface {
 
 	// ProcessMessage processes a single message from the WebSocket connection (for testing)
 	ProcessMessage(msg any)
+
+	// Ping performs an active connection health check via WebSocket ping
+	Ping(ctx context.Context) error
+
+	// OnDisconnect registers a callback invoked when reconnection attempts are exhausted
+	OnDisconnect(callback func(err error))
 }
 
 // Channel represents a realtime channel for subscriptions
