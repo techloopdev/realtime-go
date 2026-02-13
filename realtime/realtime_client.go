@@ -92,8 +92,11 @@ func (c *RealtimeClient) Connect(ctx context.Context) error {
 	// Create connection-scoped context
 	c.connCtx, c.connCancel = context.WithCancel(context.Background())
 
-	// Wrap the websocket.Conn in our Conn interface
+	// Wrap the websocket.Conn in our Conn interface (mutex-protected for concurrent Ping reads)
+	c.mu.Lock()
 	c.conn = &websocketConnWrapper{conn}
+	c.mu.Unlock()
+
 	go c.handleMessages(c.connCtx)
 	go c.startHeartbeat(c.connCtx)
 
@@ -148,9 +151,13 @@ func (c *RealtimeClient) Disconnect() error {
 	}
 
 	// Step 4: Close WebSocket connection
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+
 	var closeErr error
-	if c.conn != nil {
-		closeErr = c.conn.Close(websocket.StatusNormalClosure, "Closing the connection")
+	if conn != nil {
+		closeErr = conn.Close(websocket.StatusNormalClosure, "Closing the connection")
 	}
 
 	c.logger.Printf("[DISCONNECT_COMPLETE] channels_unsubscribed=%d total_latency=%dms",
@@ -161,10 +168,22 @@ func (c *RealtimeClient) Disconnect() error {
 
 // Ping performs an active WebSocket ping to verify connection liveness
 func (c *RealtimeClient) Ping(ctx context.Context) error {
-	if c.conn == nil {
+	c.reconnMu.Lock()
+	reconnecting := c.isReconnecting
+	c.reconnMu.Unlock()
+
+	if reconnecting {
+		return fmt.Errorf("connection is reconnecting")
+	}
+
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+
+	if conn == nil {
 		return fmt.Errorf("no active connection")
 	}
-	return c.conn.Ping(ctx)
+	return conn.Ping(ctx)
 }
 
 // OnDisconnect registers a callback invoked when all reconnection attempts fail
@@ -434,12 +453,19 @@ func (c *RealtimeClient) reconnect() {
 	reconnectErr := fmt.Errorf("failed to reconnect after %d attempts", c.config.MaxRetries)
 	c.logger.Printf("%v", reconnectErr)
 
-	// Notify consumer that connection is permanently dead
+	// Notify consumer that connection is permanently dead (panic-safe)
 	c.mu.RLock()
 	cb := c.onDisconnect
 	c.mu.RUnlock()
 	if cb != nil {
-		cb(reconnectErr)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					c.logger.Printf("[CRITICAL] OnDisconnect callback panicked: %v", r)
+				}
+			}()
+			cb(reconnectErr)
+		}()
 	}
 }
 

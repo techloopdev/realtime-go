@@ -468,6 +468,54 @@ func TestConnectCancelsPreviousContext(t *testing.T) {
 	assert.NoError(t, rc.connCtx.Err())
 }
 
+func TestPingFailsOnClosedConnection(t *testing.T) {
+	client, mockConn := testClient()
+
+	// Close the connection (simulates silent death)
+	mockConn.CloseWithError(fmt.Errorf("connection reset by peer"))
+
+	err := client.Ping(context.Background())
+	assert.Error(t, err, "Ping should fail on closed connection")
+}
+
+func TestPingFailsDuringReconnection(t *testing.T) {
+	client, _ := testClient()
+	rc := client.(*RealtimeClient)
+
+	// Simulate reconnecting state
+	rc.reconnMu.Lock()
+	rc.isReconnecting = true
+	rc.reconnMu.Unlock()
+
+	err := client.Ping(context.Background())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "reconnecting")
+
+	// Cleanup
+	rc.reconnMu.Lock()
+	rc.isReconnecting = false
+	rc.reconnMu.Unlock()
+}
+
+func TestOnDisconnectCallbackPanicRecovery(t *testing.T) {
+	client, _ := testClient()
+	rc := client.(*RealtimeClient)
+
+	// Register a callback that panics
+	client.OnDisconnect(func(err error) {
+		panic("intentional panic in test callback")
+	})
+
+	rc.config.MaxRetries = 1
+	rc.config.InitialBackoff = 1 * time.Millisecond
+	rc.config.Timeout = 10 * time.Millisecond
+
+	// Should not crash despite panicking callback
+	assert.NotPanics(t, func() {
+		rc.reconnect()
+	}, "reconnect should recover from panicking OnDisconnect callback")
+}
+
 func TestHandleMessages(t *testing.T) {
 	// Create a client with custom config for testing
 	client, _ := testClient()

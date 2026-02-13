@@ -60,6 +60,14 @@ func (c *MockConn) Write(ctx context.Context, messageType websocket.MessageType,
 
 // Ping implements websocket.Conn.Ping
 func (c *MockConn) Ping(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return fmt.Errorf("ping on closed connection")
+	}
+	if c.readError != nil {
+		return c.readError
+	}
 	return nil
 }
 
