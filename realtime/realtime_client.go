@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -476,7 +477,7 @@ func (c *RealtimeClient) reconnect() {
 					func() {
 						defer func() {
 							if r := recover(); r != nil {
-								c.logger.Printf("[CRITICAL] OnDisconnect callback panicked: %v", r)
+								c.logger.Printf("[CRITICAL] OnDisconnect callback panicked: %v\nstack: %s", r, debug.Stack())
 							}
 						}()
 						cb(rejoinErr)
@@ -507,7 +508,7 @@ func (c *RealtimeClient) reconnect() {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					c.logger.Printf("[CRITICAL] OnDisconnect callback panicked: %v", r)
+					c.logger.Printf("[CRITICAL] OnDisconnect callback panicked: %v\nstack: %s", r, debug.Stack())
 				}
 			}()
 			cb(reconnectErr)
