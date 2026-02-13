@@ -156,8 +156,8 @@ type Message struct {
 
 // PresenceEvent represents a presence event
 type PresenceEvent struct {
-	Type            string                 `json:"type"`
-	Key             string                 `json:"key"`
+	Type            string         `json:"type"`
+	Key             string         `json:"key"`
 	NewPresence     map[string]any `json:"new_presence,omitempty"`
 	CurrentPresence map[string]any `json:"current_presence,omitempty"`
 }

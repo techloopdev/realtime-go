@@ -85,15 +85,13 @@ func (c *RealtimeClient) Connect(ctx context.Context) error {
 	}
 
 	// Cancel previous connection context to stop old goroutines
+	c.mu.Lock()
 	if c.connCancel != nil {
 		c.connCancel()
 	}
 
-	// Create connection-scoped context
+	// Create connection-scoped context and assign connection (all under same lock)
 	c.connCtx, c.connCancel = context.WithCancel(context.Background())
-
-	// Wrap the websocket.Conn in our Conn interface (mutex-protected for concurrent Ping reads)
-	c.mu.Lock()
 	c.conn = &websocketConnWrapper{conn}
 	c.mu.Unlock()
 
@@ -260,12 +258,17 @@ func (c *RealtimeClient) handleMessages(ctx context.Context) {
 		c.logger.Printf("handleMessages goroutine terminated")
 	}()
 
+	// Capture connection reference at goroutine start (scoped to connCtx lifecycle)
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			_, data, err := c.conn.Read(ctx)
+			_, data, err := conn.Read(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -366,12 +369,17 @@ func (c *RealtimeClient) SendHeartbeat() error {
 	}
 
 	// Use connCtx if available for graceful shutdown awareness
+	c.mu.RLock()
+	conn := c.conn
+	connCtx := c.connCtx
+	c.mu.RUnlock()
+
 	writeCtx := context.Background()
-	if c.connCtx != nil {
-		writeCtx = c.connCtx
+	if connCtx != nil {
+		writeCtx = connCtx
 	}
 
-	return c.conn.Write(writeCtx, websocket.MessageText, data)
+	return conn.Write(writeCtx, websocket.MessageText, data)
 }
 
 func (c *RealtimeClient) reconnect() {
@@ -606,6 +614,8 @@ func (c *RealtimeClient) handlePostgresChanges(msg Message) {
 
 // SetConn sets the WebSocket connection for testing purposes
 func (c *RealtimeClient) SetConn(conn Conn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.conn = conn
 }
 
