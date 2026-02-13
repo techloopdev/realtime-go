@@ -75,8 +75,11 @@ func (c *RealtimeClient) Connect(ctx context.Context) error {
 	if c.config.APIKey != "" {
 		opts.HTTPHeader["apikey"] = []string{c.config.APIKey}
 	}
-	if c.authToken != "" {
-		opts.HTTPHeader["Authorization"] = []string{fmt.Sprintf("Bearer %s", c.authToken)}
+	c.mu.RLock()
+	authToken := c.authToken
+	c.mu.RUnlock()
+	if authToken != "" {
+		opts.HTTPHeader["Authorization"] = []string{fmt.Sprintf("Bearer %s", authToken)}
 	}
 
 	conn, _, err := websocket.Dial(ctx, c.config.URL, opts)
@@ -210,6 +213,8 @@ func (c *RealtimeClient) Channel(topic string, config *ChannelConfig) Channel {
 
 // SetAuth sets the authentication token for the client
 func (c *RealtimeClient) SetAuth(token string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.authToken = token
 	return nil
 }
@@ -227,29 +232,38 @@ func (c *RealtimeClient) GetChannels() map[string]Channel {
 
 // RemoveChannel removes a channel from the client
 func (c *RealtimeClient) RemoveChannel(ch Channel) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if ch, ok := ch.(*channel); ok {
-		if _, exists := c.channels[ch.topic]; exists {
-			delete(c.channels, ch.topic)
-			return ch.Unsubscribe()
-		}
+	internalCh, ok := ch.(*channel)
+	if !ok {
+		return fmt.Errorf("invalid channel type")
 	}
-	return fmt.Errorf("channel not found")
+
+	c.mu.Lock()
+	_, exists := c.channels[internalCh.topic]
+	if !exists {
+		c.mu.Unlock()
+		return fmt.Errorf("channel not found")
+	}
+	delete(c.channels, internalCh.topic)
+	c.mu.Unlock()
+
+	return internalCh.Unsubscribe()
 }
 
 // RemoveAllChannels removes all channels from the client
 func (c *RealtimeClient) RemoveAllChannels() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	channels := make([]*channel, 0, len(c.channels))
 	for _, ch := range c.channels {
+		channels = append(channels, ch)
+	}
+	c.channels = make(map[string]*channel)
+	c.mu.Unlock()
+
+	for _, ch := range channels {
 		if err := ch.Unsubscribe(); err != nil {
 			c.logger.Printf("Error unsubscribing from channel %s: %v", ch.topic, err)
 		}
 	}
-	c.channels = make(map[string]*channel)
 	return nil
 }
 
@@ -317,7 +331,8 @@ func (c *RealtimeClient) handleMessages(ctx context.Context) {
 			}
 
 			// Also handle by event (Supabase sends broadcasts with event="broadcast")
-			if msg.Event == "broadcast" {
+			// Skip if already handled via msg.Type to prevent duplicate processing
+			if msg.Event == "broadcast" && msg.Type != "broadcast" {
 				c.handleBroadcast(msg)
 			}
 		}
@@ -373,6 +388,10 @@ func (c *RealtimeClient) SendHeartbeat() error {
 	conn := c.conn
 	connCtx := c.connCtx
 	c.mu.RUnlock()
+
+	if conn == nil {
+		return fmt.Errorf("cannot send heartbeat: no active connection")
+	}
 
 	writeCtx := context.Background()
 	if connCtx != nil {
@@ -445,6 +464,25 @@ func (c *RealtimeClient) reconnect() {
 
 			c.logger.Printf("[RECONNECT_COMPLETE] success=%d failure=%d total_latency=%dms",
 				successCount, failureCount, time.Since(startTime).Milliseconds())
+
+			// If all channel rejoins failed, the connection is useless - notify consumer
+			if failureCount > 0 && successCount == 0 && len(channels) > 0 {
+				rejoinErr := fmt.Errorf("reconnected but all %d channel rejoins failed", failureCount)
+				c.logger.Printf("[RECONNECT_DEGRADED] %v", rejoinErr)
+				c.mu.RLock()
+				cb := c.onDisconnect
+				c.mu.RUnlock()
+				if cb != nil {
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								c.logger.Printf("[CRITICAL] OnDisconnect callback panicked: %v", r)
+							}
+						}()
+						cb(rejoinErr)
+					}()
+				}
+			}
 			return
 		}
 
@@ -624,23 +662,28 @@ func (c *RealtimeClient) ProcessMessage(msg any) {
 	// Convert the message to a map
 	msgMap, ok := msg.(map[string]any)
 	if !ok {
+		c.logger.Printf("ProcessMessage: unexpected message type %T, expected map[string]any", msg)
 		return
 	}
 
 	// Get the message type
 	msgType, ok := msgMap["type"].(string)
 	if !ok {
+		c.logger.Printf("ProcessMessage: missing or non-string 'type' field")
 		return
 	}
 
 	// Get the topic
 	topic, ok := msgMap["topic"].(string)
 	if !ok {
+		c.logger.Printf("ProcessMessage: missing or non-string 'topic' field")
 		return
 	}
 
-	// Get the channel
+	// Get the channel (mutex-protected)
+	c.mu.RLock()
 	channel, ok := c.channels[topic]
+	c.mu.RUnlock()
 	if !ok {
 		return
 	}
@@ -650,10 +693,12 @@ func (c *RealtimeClient) ProcessMessage(msg any) {
 	case "broadcast":
 		event, ok := msgMap["event"].(string)
 		if !ok {
+			c.logger.Printf("ProcessMessage: broadcast missing 'event' string field")
 			return
 		}
 		payload, err := json.Marshal(msgMap["payload"])
 		if err != nil {
+			c.logger.Printf("ProcessMessage: failed to marshal broadcast payload: %v", err)
 			return
 		}
 
