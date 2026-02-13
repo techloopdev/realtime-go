@@ -148,14 +148,16 @@ func (c *RealtimeClient) Disconnect() error {
 	}
 
 	// Step 3: Cancel connection context to stop goroutines
-	if c.connCancel != nil {
-		c.connCancel()
+	c.mu.Lock()
+	connCancel := c.connCancel
+	conn := c.conn
+	c.mu.Unlock()
+
+	if connCancel != nil {
+		connCancel()
 	}
 
 	// Step 4: Close WebSocket connection
-	c.mu.RLock()
-	conn := c.conn
-	c.mu.RUnlock()
 
 	var closeErr error
 	if conn != nil {
@@ -260,10 +262,15 @@ func (c *RealtimeClient) RemoveAllChannels() error {
 	c.channels = make(map[string]*channel)
 	c.mu.Unlock()
 
+	var failCount int
 	for _, ch := range channels {
 		if err := ch.Unsubscribe(); err != nil {
 			c.logger.Printf("Error unsubscribing from channel %s: %v", ch.topic, err)
+			failCount++
 		}
+	}
+	if failCount > 0 {
+		return fmt.Errorf("failed to unsubscribe %d/%d channels", failCount, len(channels))
 	}
 	return nil
 }
@@ -329,6 +336,8 @@ func (c *RealtimeClient) handleMessages(ctx context.Context) {
 				c.handlePresence(msg)
 			case "postgres_changes":
 				c.handlePostgresChanges(msg)
+			default:
+				c.logger.Printf("Unhandled message type=%s event=%s topic=%s", msg.Type, msg.Event, msg.Topic)
 			}
 
 			// Also handle by event (Supabase sends broadcasts with event="broadcast")
@@ -466,6 +475,12 @@ func (c *RealtimeClient) reconnect() {
 			c.logger.Printf("[RECONNECT_COMPLETE] success=%d failure=%d total_latency=%dms",
 				successCount, failureCount, time.Since(startTime).Milliseconds())
 
+			// Log partial failures as degraded state
+			if failureCount > 0 && successCount > 0 {
+				c.logger.Printf("[RECONNECT_PARTIAL] %d/%d channels failed to rejoin - connection degraded",
+					failureCount, len(channels))
+			}
+
 			// If all channel rejoins failed, the connection is useless - notify consumer
 			if failureCount > 0 && successCount == 0 && len(channels) > 0 {
 				rejoinErr := fmt.Errorf("reconnected but all %d channel rejoins failed", failureCount)
@@ -587,6 +602,8 @@ func (c *RealtimeClient) handleBroadcast(msg Message) {
 	for _, callback := range callbacks {
 		if cb, ok := callback.(func(json.RawMessage)); ok {
 			cb(actualPayload)
+		} else {
+			c.logger.Printf("Broadcast callback type mismatch: expected func(json.RawMessage), got %T", callback)
 		}
 	}
 }
@@ -617,6 +634,8 @@ func (c *RealtimeClient) handlePresence(msg Message) {
 	for _, callback := range callbacks {
 		if cb, ok := callback.(func(PresenceEvent)); ok {
 			cb(presenceEvent)
+		} else {
+			c.logger.Printf("Presence callback type mismatch: expected func(PresenceEvent), got %T", callback)
 		}
 	}
 }
@@ -647,6 +666,8 @@ func (c *RealtimeClient) handlePostgresChanges(msg Message) {
 	for _, callback := range callbacks {
 		if cb, ok := callback.(func(PostgresChangeEvent)); ok {
 			cb(changeEvent)
+		} else {
+			c.logger.Printf("PostgresChanges callback type mismatch: expected func(PostgresChangeEvent), got %T", callback)
 		}
 	}
 }
@@ -734,6 +755,7 @@ func (c *RealtimeClient) ProcessMessage(msg any) {
 	case "presence":
 		key, ok := msgMap["key"].(string)
 		if !ok {
+			c.logger.Printf("ProcessMessage: presence missing 'key' string field")
 			return
 		}
 		channel.mu.RLock()
@@ -749,10 +771,12 @@ func (c *RealtimeClient) ProcessMessage(msg any) {
 	case "postgres_changes":
 		table, ok := msgMap["table"].(string)
 		if !ok {
+			c.logger.Printf("ProcessMessage: postgres_changes missing 'table' string field")
 			return
 		}
 		schema, ok := msgMap["schema"].(string)
 		if !ok {
+			c.logger.Printf("ProcessMessage: postgres_changes missing 'schema' string field")
 			return
 		}
 		channel.mu.RLock()
